@@ -8,7 +8,7 @@ import lief
 
 def get_binary_header(
     file_path: Annotated[str, Field(
-        description="二进制文件的完整路径，支持ELF、PE、MachO格式的可执行文件"
+        description="二进制文件在系统中的完整绝对路径，例如：/Users/username/Documents/binary_file 或 /home/user/app/executable，支持ELF、PE、MachO格式的可执行文件"
     )]
 ) -> Dict[str, Any]:
     """
