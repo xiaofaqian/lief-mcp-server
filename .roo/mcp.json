@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "github.com/upstash/context7-mcp": {
+      "autoApprove": [],
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/Users/aguangshi/.deno/bin/deno",
+      "args": [
+        "run",
+        "--allow-env=NO_DEPRECATION,TRACE_DEPRECATION",
+        "--allow-net",
+        "npm:@upstash/context7-mcp"
+      ]
+    },
+    "lief-mcp-server": {
+      "disabled": false,
+      "timeout": 1800,
+      "type": "stdio",
+      "command": "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13/bin/python3",
+      "args": [
+        "/Users/aguangshi/Desktop/local-mcp-server/lief-mcp-server/server.py"
+      ]
+    },
+    "github.com/mrexodia/ida-pro-mcp": {
+      "disabled": false,
+      "timeout": 1800,
+      "type": "stdio",
+      "command": "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13/bin/python3",
+      "args": [
+        "/opt/homebrew/lib/python3.13/site-packages/ida_pro_mcp/server.py"
+      ]
+    }
+  }
+}

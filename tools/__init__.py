@@ -5,32 +5,54 @@ LIEF MCP服务器工具包
 所有工具都遵循标准的MCP工具规范，提供统一的接口和异常处理。
 """
 
-from .get_binary_header import get_binary_header
-from .query_symbols import query_symbols
-from .add_macho_function_symbol import add_macho_function_symbol
-from .remove_macho_symbol import remove_macho_symbol
-from .query_macho_method_references import query_macho_method_references
-from .disassemble_macho_at_address import disassemble_macho_at_address
-from .assemble_to_bytes import assemble_to_bytes
+# 导入工具函数
+from .parse_macho_info import parse_macho_info
+from .list_macho_architectures import list_macho_architectures
+from .get_macho_header import get_macho_header
+from .list_macho_segments import list_macho_segments
+from .list_macho_sections import list_macho_sections
+from .get_macho_section_content import get_macho_section_content
+from .list_macho_symbols import list_macho_symbols
+from .list_macho_imports import list_macho_imports
+from .list_macho_exports import list_macho_exports
+from .list_macho_libraries import list_macho_libraries
+from .get_macho_dyld_info import get_macho_dyld_info
+from .list_macho_relocations import list_macho_relocations
+from .get_macho_load_commands import get_macho_load_commands
+from .disassemble_macho_code import disassemble_macho_code
 
 # 导出所有工具函数
 __all__ = [
-    "get_binary_header",
-    "query_symbols",
-    "add_macho_function_symbol",
-    "remove_macho_symbol",
-    "query_macho_method_references",
-    "disassemble_macho_at_address",
-    "assemble_to_bytes"
+    "parse_macho_info",
+    "list_macho_architectures",
+    "get_macho_header",
+    "list_macho_segments",
+    "list_macho_sections",
+    "get_macho_section_content",
+    "list_macho_symbols",
+    "list_macho_imports",
+    "list_macho_exports",
+    "list_macho_libraries",
+    "get_macho_dyld_info",
+    "list_macho_relocations",
+    "get_macho_load_commands",
+    "disassemble_macho_code"
 ]
 
 # 工具列表，便于动态注册
 TOOLS = [
-    get_binary_header,
-    query_symbols,
-    add_macho_function_symbol,
-    remove_macho_symbol,
-    query_macho_method_references,
-    disassemble_macho_at_address,
-    assemble_to_bytes
+    parse_macho_info,
+    list_macho_architectures,
+    get_macho_header,
+    list_macho_segments,
+    list_macho_sections,
+    get_macho_section_content,
+    list_macho_symbols,
+    list_macho_imports,
+    list_macho_exports,
+    list_macho_libraries,
+    get_macho_dyld_info,
+    list_macho_relocations,
+    get_macho_load_commands,
+    disassemble_macho_code
 ]
