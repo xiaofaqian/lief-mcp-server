@@ -19,7 +19,10 @@ from .list_macho_libraries import list_macho_libraries
 from .get_macho_dyld_info import get_macho_dyld_info
 from .list_macho_relocations import list_macho_relocations
 from .get_macho_load_commands import get_macho_load_commands
+from .analyze_macho_objc_metadata import analyze_macho_objc_metadata
 from .disassemble_macho_code import disassemble_macho_code
+from .assemble_macho_code import assemble_macho_code
+
 
 # 导出所有工具函数
 __all__ = [
@@ -36,7 +39,9 @@ __all__ = [
     "get_macho_dyld_info",
     "list_macho_relocations",
     "get_macho_load_commands",
-    "disassemble_macho_code"
+    "disassemble_macho_code",
+    "assemble_macho_code",
+    "analyze_macho_objc_metadata"
 ]
 
 # 工具列表，便于动态注册
@@ -54,5 +59,7 @@ TOOLS = [
     get_macho_dyld_info,
     list_macho_relocations,
     get_macho_load_commands,
-    disassemble_macho_code
+    disassemble_macho_code,
+    assemble_macho_code,
+    analyze_macho_objc_metadata
 ]
