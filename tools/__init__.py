@@ -22,6 +22,8 @@ from .get_macho_load_commands import get_macho_load_commands
 from .analyze_macho_objc_metadata import analyze_macho_objc_metadata
 from .disassemble_macho_code import disassemble_macho_code
 from .assemble_macho_code import assemble_macho_code
+from .add_macho_section import add_macho_section
+from .calculate_arm64_branch_target import calculate_arm64_branch_target
 
 
 # 导出所有工具函数
@@ -41,7 +43,9 @@ __all__ = [
     "get_macho_load_commands",
     "disassemble_macho_code",
     "assemble_macho_code",
-    "analyze_macho_objc_metadata"
+    "analyze_macho_objc_metadata",
+    "add_macho_section",
+    "calculate_arm64_branch_target"
 ]
 
 # 工具列表，便于动态注册
@@ -61,5 +65,7 @@ TOOLS = [
     get_macho_load_commands,
     disassemble_macho_code,
     assemble_macho_code,
-    analyze_macho_objc_metadata
+    analyze_macho_objc_metadata,
+    add_macho_section,
+    calculate_arm64_branch_target
 ]

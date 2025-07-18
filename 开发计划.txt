@@ -1,4 +1,0 @@
-assemble_macho_code: 在指定地址替换 Mach-O 指令
-patch_macho_function: 修改特定函数的代码
-inject_macho_code: 注入新的代码段
-add_macho_library 添加库

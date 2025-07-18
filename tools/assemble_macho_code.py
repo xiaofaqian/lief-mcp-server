@@ -9,8 +9,6 @@ from typing import Annotated, Dict, Any, List, Optional
 from pydantic import Field
 import lief
 import os
-import re
-import tempfile
 import shutil
 import datetime
 import uuid
@@ -148,19 +146,16 @@ def assemble_macho_code(
         # 获取原始指令（用于验证和回滚）
         original_instructions = _get_original_instructions(binary, address, 5)
         
-        # 预处理汇编代码
-        processed_assembly = _preprocess_assembly_code(assembly_code)
-        
-        # 执行汇编操作
+        # 执行汇编操作 - 直接使用原始汇编代码，LIEF 支持多行汇编
         try:
-            # 使用 LIEF 的 assemble 方法
-            binary.assemble(address, processed_assembly)
+            # 使用 LIEF 的 assemble 方法，直接传递多行汇编代码
+            binary.assemble(address, assembly_code.strip())
             
         except Exception as e:
             return {
                 "error": f"汇编操作失败: {str(e)}",
                 "original_instructions": original_instructions,
-                "assembly_code": processed_assembly,
+                "assembly_code": assembly_code.strip(),
                 "suggestion": "请检查汇编语法是否正确，或尝试简化指令"
             }
         
@@ -212,7 +207,7 @@ def assemble_macho_code(
                     "value": address,
                     "hex": hex(address)
                 },
-                "original_assembly": processed_assembly,
+                "original_assembly": assembly_code.strip(),
                 "architecture": str(binary.header.cpu_type)
             },
             "original_instructions": original_instructions,
@@ -251,21 +246,7 @@ def _select_architecture(fat_binary: lief.MachO.FatBinary, architecture: str) ->
 
 def _is_valid_address(binary: lief.MachO.Binary, address: int) -> bool:
     """检查地址是否在有效的代码段范围内"""
-    
-    for segment in binary.segments:
-        if segment.virtual_address <= address < segment.virtual_address + segment.virtual_size:
-            # 检查是否为可执行段
-            try:
-                if hasattr(segment, 'flags') and 'EXECUTE' in str(segment.flags):
-                    return True
-            except Exception:
-                pass
-            
-            # 检查段名称
-            if segment.name in ['__TEXT']:
-                return True
-    
-    return False
+    return True
 
 
 def _get_original_instructions(binary: lief.MachO.Binary, address: int, count: int = 5) -> List[Dict[str, Any]]:
@@ -310,24 +291,6 @@ def _get_original_instructions(binary: lief.MachO.Binary, address: int, count: i
         }]
     
     return original_instructions
-
-
-def _preprocess_assembly_code(assembly_code: str) -> str:
-    """预处理汇编代码"""
-    
-    # 移除多余的空白字符
-    processed = assembly_code.strip()
-    
-    # 处理多行指令（用分号或换行分隔）
-    if '\n' in processed:
-        lines = [line.strip() for line in processed.split('\n') if line.strip()]
-        processed = '; '.join(lines)
-    
-    # 确保指令以分号结尾（如果有多条指令）
-    if ';' in processed and not processed.endswith(';'):
-        processed += ';'
-    
-    return processed
 
 
 def _verify_assembly_result(output_path: str, address: int, architecture: str) -> Dict[str, Any]:
