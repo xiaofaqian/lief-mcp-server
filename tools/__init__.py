@@ -24,6 +24,7 @@ from .disassemble_macho_code import disassemble_macho_code
 from .assemble_macho_code import assemble_macho_code
 from .add_macho_section import add_macho_section
 from .calculate_arm64_branch_target import calculate_arm64_branch_target
+from .calculate_address_offset import calculate_address_offset
 
 
 # 导出所有工具函数
@@ -45,7 +46,8 @@ __all__ = [
     "assemble_macho_code",
     "analyze_macho_objc_metadata",
     "add_macho_section",
-    "calculate_arm64_branch_target"
+    "calculate_arm64_branch_target",
+    "calculate_address_offset"
 ]
 
 # 工具列表，便于动态注册
@@ -67,5 +69,6 @@ TOOLS = [
     assemble_macho_code,
     analyze_macho_objc_metadata,
     add_macho_section,
-    calculate_arm64_branch_target
+    calculate_arm64_branch_target,
+    calculate_address_offset
 ]

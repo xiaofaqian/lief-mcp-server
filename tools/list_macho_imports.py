@@ -21,9 +21,9 @@ def list_macho_imports(
         ge=0
     )] = 0,
     count: Annotated[int, Field(
-        description="返回的导入项数量，最大100条，0表示返回所有剩余导入项",
+        description="返回的导入项数量，最大20条，0表示返回所有剩余导入项",
         ge=0,
-        le=100
+        le=20
     )] = 20,
     name_filter: Annotated[Optional[str], Field(
         description="导入项名称过滤器，支持正则表达式匹配。例如：'malloc' 或 '^_.*' 或 '.*Foundation.*'"
