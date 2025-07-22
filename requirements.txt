@@ -1,5 +1,4 @@
 mcp[cli]>=1.10.0
-lief>=0.16.0
+lief-extended>=0.17.0
 pydantic>=2.0.0
 capstone>=5.0.0
-pwntools>=4.8.0

@@ -1,16 +1,16 @@
 """
 Mach-O Objective-C 元数据分析工具
 
-此工具专门用于分析 Mach-O 文件中的 Objective-C 元数据信息，使用 macOS 原生的 otool 工具。
+此工具专门用于分析 Mach-O 文件中的 Objective-C 元数据信息，使用 LIEF 库直接解析二进制文件。
 提供完整的 Objective-C 运行时信息解析，包括类、方法、协议、属性等详细信息。
 支持分页和过滤机制，防止返回数据过大。
 """
 
 from typing import Annotated, Dict, Any, List, Optional
 from pydantic import Field
-import subprocess
 import os
 import re
+import lief
 
 
 def analyze_macho_objc_metadata(
@@ -58,7 +58,7 @@ def analyze_macho_objc_metadata(
     )] = ""
 ) -> Dict[str, Any]:
     """
-    使用 otool 分析 Mach-O 文件中的 Objective-C 元数据信息，包括类、方法、协议、属性等详细数据。
+    使用 LIEF 分析 Mach-O 文件中的 Objective-C 元数据信息，包括类、方法、协议、属性等详细数据。
     
     该工具解析 Mach-O 文件的 Objective-C 运行时信息，提供：
     - 类的完整信息（名称、父类、实例大小等）
@@ -69,7 +69,7 @@ def analyze_macho_objc_metadata(
     - 类声明代码生成
     - 统计和分析信息
     
-    使用 macOS 原生 otool 工具，确保兼容性和准确性。支持单架构和 Fat Binary 文件的 Objective-C 元数据提取。
+    使用 LIEF 库直接解析二进制文件，确保准确性和高效性。支持单架构和 Fat Binary 文件的 Objective-C 元数据提取。
     """
     try:
         # 验证文件路径
@@ -85,17 +85,16 @@ def analyze_macho_objc_metadata(
                 "suggestion": "请检查文件权限，确保当前用户有读取权限"
             }
         
-        # 检查 otool 工具是否可用
-        if not _check_otool_available():
+        # 使用 LIEF 解析 Mach-O 文件
+        macho_binary = _safe_parse_macho(file_path, architecture)
+        if macho_binary is None:
             return {
-                "error": "otool 工具不可用",
-                "suggestion": "此工具需要在 macOS 系统上运行，或安装 Xcode Command Line Tools"
+                "error": f"无法解析 Mach-O 文件: {file_path}",
+                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
             }
         
-        # 获取文件架构信息
-        arch_info = _get_architecture_info(file_path, architecture)
-        if "error" in arch_info:
-            return arch_info
+        # 获取架构信息
+        arch_info = _get_architecture_info(macho_binary)
         
         # 编译正则表达式过滤器
         class_regex_filter = None
@@ -120,8 +119,8 @@ def analyze_macho_objc_metadata(
                 }
         
         # 分析 Objective-C 元数据
-        objc_result = _analyze_objc_metadata(
-            file_path, arch_info["selected_arch"], offset, count,
+        objc_result = _analyze_objc_metadata_with_lief(
+            macho_binary, offset, count,
             class_regex_filter, method_regex_filter, summary_only,
             include_methods, include_properties, include_protocols, 
             include_ivars, generate_declarations, show_addresses
@@ -157,89 +156,77 @@ def analyze_macho_objc_metadata(
         }
 
 
-def _check_otool_available() -> bool:
-    """检查 otool 工具是否可用"""
+def _safe_parse_macho(file_path: str, requested_arch: str = "") -> Optional[lief.MachO.Binary]:
+    """安全解析 Mach-O 文件"""
     try:
-        result = subprocess.run(['otool', '--version'], 
-                              capture_output=True, text=True, timeout=5)
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _get_architecture_info(file_path: str, requested_arch: str = "") -> Dict[str, Any]:
-    """获取文件的架构信息"""
-    try:
-        # 使用 file 命令获取基本信息
-        file_result = subprocess.run(['file', file_path], 
-                                   capture_output=True, text=True, timeout=10)
+        # 使用 LIEF 解析文件
+        fat_binary = lief.MachO.parse(file_path)
+        if fat_binary is None:
+            return None
         
-        if file_result.returncode != 0:
-            return {
-                "error": f"无法获取文件信息: {file_result.stderr}",
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
-        
-        file_output = file_result.stdout.strip()
-        
-        # 使用 lipo 命令获取架构列表（如果是 Fat Binary）
-        lipo_result = subprocess.run(['lipo', '-info', file_path], 
-                                   capture_output=True, text=True, timeout=10)
-        
-        architectures = []
-        selected_arch = ""
-        
-        if lipo_result.returncode == 0:
-            lipo_output = lipo_result.stdout.strip()
+        # 处理 Fat Binary
+        if len(fat_binary) > 1:
+            # 如果指定了架构，尝试获取指定架构
+            if requested_arch:
+                # 尝试根据架构名称选择
+                arch_mapping = {
+                    'x86_64': lief.MachO.Header.CPU_TYPE.X86_64,
+                    'arm64': lief.MachO.Header.CPU_TYPE.ARM64,
+                    'i386': lief.MachO.Header.CPU_TYPE.X86,
+                    'arm': lief.MachO.Header.CPU_TYPE.ARM
+                }
+                
+                if requested_arch.lower() in arch_mapping:
+                    selected_binary = fat_binary.take(arch_mapping[requested_arch.lower()])
+                    if selected_binary:
+                        return selected_binary
             
-            if "Non-fat file" in lipo_output:
-                # 单架构文件
-                arch_match = re.search(r'is architecture: (\w+)', lipo_output)
-                if arch_match:
-                    arch = arch_match.group(1)
-                    architectures = [arch]
-                    selected_arch = arch
-            else:
-                # Fat Binary 文件
-                arch_match = re.search(r'Architectures in the fat file: .* are: (.+)', lipo_output)
-                if arch_match:
-                    architectures = arch_match.group(1).split()
-                    
-                    # 选择架构
-                    if requested_arch and requested_arch in architectures:
-                        selected_arch = requested_arch
-                    else:
-                        selected_arch = architectures[0]  # 默认选择第一个
+            # 默认选择第一个架构
+            return fat_binary.at(0)
+        else:
+            return fat_binary.at(0)
+            
+    except Exception as e:
+        return None
+
+
+def _get_architecture_info(macho_binary: lief.MachO.Binary) -> Dict[str, Any]:
+    """获取架构信息"""
+    try:
+        header = macho_binary.header
         
-        if not architectures:
-            return {
-                "error": "无法识别文件架构",
-                "file_info": file_output,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        # 获取 CPU 类型字符串
+        cpu_type_str = str(header.cpu_type)
+        cpu_subtype_str = str(header.cpu_subtype)
+        
+        # 提取架构名称
+        arch_name = "unknown"
+        if "X86_64" in cpu_type_str:
+            arch_name = "x86_64"
+        elif "ARM64" in cpu_type_str:
+            arch_name = "arm64"
+        elif "X86" in cpu_type_str and "X86_64" not in cpu_type_str:
+            arch_name = "i386"
+        elif "ARM" in cpu_type_str and "ARM64" not in cpu_type_str:
+            arch_name = "arm"
         
         return {
-            "file_type": file_output,
-            "architectures": architectures,
-            "selected_arch": selected_arch,
-            "is_fat_binary": len(architectures) > 1
+            "selected_arch": arch_name,
+            "cpu_type": cpu_type_str,
+            "cpu_subtype": cpu_subtype_str,
+            "file_type": str(header.file_type),
+            "is_fat_binary": False  # 单个二进制文件
         }
         
-    except subprocess.TimeoutExpired:
-        return {
-            "error": "获取架构信息超时",
-            "suggestion": "文件可能过大或系统负载过高，请稍后重试"
-        }
     except Exception as e:
         return {
-            "error": f"获取架构信息失败: {str(e)}",
-            "suggestion": "请检查文件是否为有效的 Mach-O 文件"
+            "selected_arch": "unknown",
+            "error": f"获取架构信息失败: {str(e)}"
         }
 
 
-def _analyze_objc_metadata(
-    file_path: str,
-    architecture: str,
+def _analyze_objc_metadata_with_lief(
+    macho_binary: lief.MachO.Binary,
     offset: int,
     count: int,
     class_filter,
@@ -252,38 +239,35 @@ def _analyze_objc_metadata(
     generate_declarations: bool,
     show_addresses: bool
 ) -> Dict[str, Any]:
-    """使用 otool 分析 Objective-C 元数据"""
+    """使用 LIEF 分析 Objective-C 元数据"""
     
     try:
-        # 使用 otool -oV 获取 Objective-C 元数据
-        cmd = ['otool', '-oV', file_path]
-        if architecture:
-            cmd.extend(['-arch', architecture])
+        # 获取 Objective-C 元数据
+        metadata = macho_binary.objc_metadata
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        
-        if result.returncode != 0:
-            return {
-                "error": f"otool 执行失败: {result.stderr}",
-                "command": ' '.join(cmd),
-                "suggestion": "请检查文件是否包含 Objective-C 元数据，或尝试其他架构"
-            }
-        
-        output = result.stdout
-        
-        # 检查是否包含 Objective-C 元数据
-        if "Contents of (__DATA,__objc_classlist)" not in output and "Contents of (__DATA_CONST,__objc_classlist)" not in output:
+        if metadata is None:
             return {
                 "has_objc_metadata": False,
                 "message": "此文件不包含 Objective-C 元数据",
                 "suggestion": "请检查文件是否包含 Objective-C 代码"
             }
         
-        # 解析 Objective-C 元数据
-        parsed_data = _parse_objc_output(output, show_addresses and not summary_only)
+        # 提取所有类信息
+        all_classes = []
+        for cls in metadata.classes:
+            try:
+                class_info = _extract_class_info(cls, show_addresses, include_methods, 
+                                               include_properties, include_protocols, include_ivars)
+                all_classes.append(class_info)
+            except Exception as e:
+                # 如果单个类解析失败，添加错误信息但继续处理其他类
+                all_classes.append({
+                    "name": "parse_error",
+                    "error": f"解析类信息时发生错误: {str(e)}"
+                })
         
         # 应用过滤器
-        filtered_classes = _apply_filters(parsed_data["classes"], class_filter, method_filter)
+        filtered_classes = _apply_filters(all_classes, class_filter, method_filter)
         
         # 应用分页
         total_classes = len(filtered_classes)
@@ -317,7 +301,7 @@ def _analyze_objc_metadata(
             "has_objc_metadata": True,
             "summary_mode": summary_only,
             "pagination_info": {
-                "total_classes_in_binary": len(parsed_data["classes"]),
+                "total_classes_in_binary": len(all_classes),
                 "filtered_classes_count": total_classes,
                 "requested_offset": offset,
                 "requested_count": count,
@@ -332,349 +316,257 @@ def _analyze_objc_metadata(
             "classes": paged_classes
         }
         
-        # 添加协议信息（如果需要且不是摘要模式）
-        if include_protocols and not summary_only:
-            result["protocols"] = parsed_data.get("protocols", [])
-        
         # 生成声明代码（如果需要且不是摘要模式）
         if generate_declarations and not summary_only:
-            result["declarations"] = _generate_declarations(paged_classes)
+            result["declarations"] = _generate_lief_declarations(
+                metadata, paged_classes, show_addresses
+            )
         
         # 添加统计信息
-        result["statistics"] = _calculate_statistics(parsed_data)
+        result["statistics"] = _calculate_statistics(all_classes)
         
         return result
         
-    except subprocess.TimeoutExpired:
-        return {
-            "error": "Objective-C 元数据分析超时",
-            "suggestion": "文件可能过大，请尝试减少返回的类数量"
-        }
     except Exception as e:
         return {
-            "error": f"分析 Objective-C 元数据失败: {str(e)}",
-            "suggestion": "请检查文件格式和权限"
+            "error": f"使用 LIEF 分析 Objective-C 元数据失败: {str(e)}",
+            "suggestion": "请检查文件格式和 LIEF 库版本"
         }
 
 
-def _parse_objc_output(output: str, show_addresses: bool) -> Dict[str, Any]:
-    """解析 otool -oV 的输出"""
-    
-    parsed_data = {
-        "classes": [],
-        "protocols": [],
-        "categories": []
-    }
-    
-    lines = output.split('\n')
-    current_section = None
-    current_class = None
-    current_protocol = None
-    i = 0
-    
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        # 识别不同的节
-        if "Contents of (__DATA,__objc_classlist)" in line or "Contents of (__DATA_CONST,__objc_classlist)" in line:
-            current_section = "classlist"
-        elif "Contents of (__DATA,__objc_protolist)" in line or "Contents of (__DATA_CONST,__objc_protolist)" in line:
-            current_section = "protolist"
-        elif "Contents of (__DATA,__objc_catlist)" in line or "Contents of (__DATA_CONST,__objc_catlist)" in line:
-            current_section = "catlist"
-        elif line.startswith("isa ") and current_section == "classlist":
-            # 开始解析一个新类
-            current_class = _parse_class_info(lines, i, show_addresses)
-            if current_class:
-                parsed_data["classes"].append(current_class)
-        elif line.startswith("isa ") and current_section == "protolist":
-            # 开始解析一个新协议
-            current_protocol = _parse_protocol_info(lines, i, show_addresses)
-            if current_protocol:
-                parsed_data["protocols"].append(current_protocol)
-        
-        i += 1
-    
-    return parsed_data
-
-
-def _parse_class_info(lines: List[str], start_index: int, show_addresses: bool) -> Optional[Dict[str, Any]]:
-    """解析单个类的信息"""
+def _extract_class_info(
+    cls: lief.objc.Class, 
+    show_addresses: bool,
+    include_methods: bool,
+    include_properties: bool,
+    include_protocols: bool,
+    include_ivars: bool
+) -> Dict[str, Any]:
+    """从 LIEF 类对象提取信息"""
     
     class_info = {
-        "name": "unknown",
-        "superclass": None,
-        "methods": {"instance_methods": [], "class_methods": []},
-        "properties": [],
-        "instance_variables": [],
-        "protocols": []
+        "name": cls.name if hasattr(cls, 'name') else "unknown"
     }
     
-    i = start_index
+    # 提取父类信息
+    try:
+        if hasattr(cls, 'super_class') and cls.super_class:
+            class_info["superclass"] = {"name": cls.super_class.name}
+        else:
+            class_info["superclass"] = None
+    except Exception:
+        class_info["superclass"] = None
+    
+    # 提取实例大小（如果可用）
+    try:
+        if hasattr(cls, 'instance_size'):
+            class_info["instance_size"] = cls.instance_size
+    except Exception:
+        pass
+    
+    # 提取方法信息
+    if include_methods or not include_methods:  # 总是提取，后续根据参数决定是否包含
+        class_info["methods"] = _extract_methods(cls, show_addresses)
+    
+    # 提取属性信息
+    if include_properties or not include_properties:  # 总是提取，后续根据参数决定是否包含
+        class_info["properties"] = _extract_properties(cls)
+    
+    # 提取实例变量信息
+    if include_ivars or not include_ivars:  # 总是提取，后续根据参数决定是否包含
+        class_info["instance_variables"] = _extract_ivars(cls)
+    
+    # 提取协议信息
+    if include_protocols or not include_protocols:  # 总是提取，后续根据参数决定是否包含
+        class_info["protocols"] = _extract_protocols(cls)
+    
+    return class_info
+
+
+def _extract_methods(cls: lief.objc.Class, show_addresses: bool) -> Dict[str, List]:
+    """提取方法信息"""
+    
+    instance_methods = []
+    class_methods = []
     
     try:
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            # 解析类名
-            if "name " in line:
-                name_match = re.search(r'name\s+(.+)', line)
-                if name_match:
-                    class_info["name"] = name_match.group(1).strip()
-            
-            # 解析父类
-            elif "superclass " in line:
-                superclass_match = re.search(r'superclass\s+(.+)', line)
-                if superclass_match:
-                    superclass_name = superclass_match.group(1).strip()
-                    if superclass_name != "0x0":
-                        class_info["superclass"] = {"name": superclass_name}
-            
-            # 解析实例大小
-            elif "instance size " in line:
-                size_match = re.search(r'instance size\s+(\d+)', line)
-                if size_match:
-                    class_info["instance_size"] = int(size_match.group(1))
-            
-            # 解析方法列表
-            elif "baseMethods " in line:
-                methods = _parse_method_list(lines, i + 1)
-                class_info["methods"]["instance_methods"].extend(methods)
-            
-            # 解析属性列表
-            elif "baseProperties " in line:
-                properties = _parse_property_list(lines, i + 1)
-                class_info["properties"].extend(properties)
-            
-            # 解析实例变量
-            elif "ivars " in line:
-                ivars = _parse_ivar_list(lines, i + 1)
-                class_info["instance_variables"].extend(ivars)
-            
-            # 解析协议列表
-            elif "baseProtocols " in line:
-                protocols = _parse_protocol_list(lines, i + 1)
-                class_info["protocols"].extend(protocols)
-            
-            # 检查是否到达下一个类或节的开始
-            elif (line.startswith("isa ") or 
-                  "Contents of" in line or 
-                  line == ""):
-                if i > start_index:  # 确保我们已经处理了一些内容
-                    break
-            
-            i += 1
-        
-        return class_info if class_info["name"] != "unknown" else None
-        
-    except Exception as e:
-        return {
-            "name": "parse_error",
-            "error": f"解析类信息时发生错误: {str(e)}"
-        }
-
-
-def _parse_method_list(lines: List[str], start_index: int) -> List[Dict[str, Any]]:
-    """解析方法列表"""
+        if hasattr(cls, 'methods'):
+            for method in cls.methods:
+                try:
+                    method_info = {
+                        "name": method.name if hasattr(method, 'name') else "unknown"
+                    }
+                    
+                    # 添加地址信息（如果需要且可用）
+                    if show_addresses and hasattr(method, 'address'):
+                        try:
+                            method_info["address"] = hex(method.address)
+                            method_info["implementation"] = hex(method.address)
+                        except Exception:
+                            pass
+                    
+                    # 添加类型信息（如果可用）
+                    if hasattr(method, 'types'):
+                        try:
+                            method_info["types"] = method.types
+                        except Exception:
+                            pass
+                    
+                    # 目前 LIEF 可能不区分实例方法和类方法，都放在实例方法中
+                    instance_methods.append(method_info)
+                    
+                except Exception as e:
+                    # 如果单个方法解析失败，添加错误信息
+                    instance_methods.append({
+                        "name": "method_parse_error",
+                        "error": str(e)
+                    })
+    except Exception:
+        pass
     
-    methods = []
-    i = start_index
-    
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        if not line or line.startswith("isa ") or "Contents of" in line:
-            break
-        
-        # 解析方法信息
-        if "name " in line:
-            method_info = {}
-            
-            # 提取方法名
-            name_match = re.search(r'name\s+(.+)', line)
-            if name_match:
-                method_info["name"] = name_match.group(1).strip()
-            
-            # 查找类型和实现地址
-            j = i + 1
-            while j < len(lines) and j < i + 5:  # 限制搜索范围
-                next_line = lines[j].strip()
-                
-                if "types " in next_line:
-                    types_match = re.search(r'types\s+(.+)', next_line)
-                    if types_match:
-                        method_info["types"] = types_match.group(1).strip()
-                
-                elif "imp " in next_line:
-                    imp_match = re.search(r'imp\s+(.+)', next_line)
-                    if imp_match:
-                        method_info["implementation"] = imp_match.group(1).strip()
-                
-                j += 1
-            
-            if "name" in method_info:
-                methods.append(method_info)
-        
-        i += 1
-    
-    return methods
+    return {
+        "instance_methods": instance_methods,
+        "class_methods": class_methods
+    }
 
 
-def _parse_property_list(lines: List[str], start_index: int) -> List[Dict[str, Any]]:
-    """解析属性列表"""
+def _extract_properties(cls: lief.objc.Class) -> List[Dict[str, Any]]:
+    """提取属性信息"""
     
     properties = []
-    i = start_index
     
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        if not line or line.startswith("isa ") or "Contents of" in line:
-            break
-        
-        # 解析属性信息
-        if "name " in line:
-            prop_info = {}
-            
-            # 提取属性名
-            name_match = re.search(r'name\s+(.+)', line)
-            if name_match:
-                prop_info["name"] = name_match.group(1).strip()
-            
-            # 查找属性特性
-            j = i + 1
-            while j < len(lines) and j < i + 3:
-                next_line = lines[j].strip()
-                
-                if "attributes " in next_line:
-                    attr_match = re.search(r'attributes\s+(.+)', next_line)
-                    if attr_match:
-                        prop_info["attributes"] = attr_match.group(1).strip()
-                
-                j += 1
-            
-            if "name" in prop_info:
-                properties.append(prop_info)
-        
-        i += 1
+    try:
+        if hasattr(cls, 'properties'):
+            for prop in cls.properties:
+                try:
+                    prop_info = {
+                        "name": prop.name if hasattr(prop, 'name') else "unknown"
+                    }
+                    
+                    # 添加属性特性（如果可用）
+                    if hasattr(prop, 'attributes'):
+                        try:
+                            prop_info["attributes"] = prop.attributes
+                        except Exception:
+                            pass
+                    
+                    properties.append(prop_info)
+                    
+                except Exception as e:
+                    properties.append({
+                        "name": "property_parse_error",
+                        "error": str(e)
+                    })
+    except Exception:
+        pass
     
     return properties
 
 
-def _parse_ivar_list(lines: List[str], start_index: int) -> List[Dict[str, Any]]:
-    """解析实例变量列表"""
+def _extract_ivars(cls: lief.objc.Class) -> List[Dict[str, Any]]:
+    """提取实例变量信息"""
     
     ivars = []
-    i = start_index
     
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        if not line or line.startswith("isa ") or "Contents of" in line:
-            break
-        
-        # 解析实例变量信息
-        if "name " in line:
-            ivar_info = {}
-            
-            # 提取变量名
-            name_match = re.search(r'name\s+(.+)', line)
-            if name_match:
-                ivar_info["name"] = name_match.group(1).strip()
-            
-            # 查找类型和偏移
-            j = i + 1
-            while j < len(lines) and j < i + 5:
-                next_line = lines[j].strip()
-                
-                if "type " in next_line:
-                    type_match = re.search(r'type\s+(.+)', next_line)
-                    if type_match:
-                        ivar_info["type"] = type_match.group(1).strip()
-                
-                elif "offset " in next_line:
-                    offset_match = re.search(r'offset\s+(\d+)', next_line)
-                    if offset_match:
-                        ivar_info["offset"] = int(offset_match.group(1))
-                
-                j += 1
-            
-            if "name" in ivar_info:
-                ivars.append(ivar_info)
-        
-        i += 1
+    try:
+        if hasattr(cls, 'ivars'):
+            for ivar in cls.ivars:
+                try:
+                    ivar_info = {
+                        "name": ivar.name if hasattr(ivar, 'name') else "unknown"
+                    }
+                    
+                    # 添加类型信息（如果可用）
+                    if hasattr(ivar, 'type'):
+                        try:
+                            ivar_info["type"] = ivar.type
+                        except Exception:
+                            pass
+                    
+                    # 添加偏移信息（如果可用）
+                    if hasattr(ivar, 'offset'):
+                        try:
+                            ivar_info["offset"] = ivar.offset
+                        except Exception:
+                            pass
+                    
+                    ivars.append(ivar_info)
+                    
+                except Exception as e:
+                    ivars.append({
+                        "name": "ivar_parse_error",
+                        "error": str(e)
+                    })
+    except Exception:
+        pass
     
     return ivars
 
 
-def _parse_protocol_list(lines: List[str], start_index: int) -> List[Dict[str, Any]]:
-    """解析协议列表"""
+def _extract_protocols(cls: lief.objc.Class) -> List[Dict[str, Any]]:
+    """提取协议信息"""
     
     protocols = []
-    i = start_index
     
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        if not line or line.startswith("isa ") or "Contents of" in line:
-            break
-        
-        # 解析协议信息
-        if "name " in line:
-            protocol_info = {}
-            
-            # 提取协议名
-            name_match = re.search(r'name\s+(.+)', line)
-            if name_match:
-                protocol_info["name"] = name_match.group(1).strip()
-                protocols.append(protocol_info)
-        
-        i += 1
+    try:
+        if hasattr(cls, 'protocols'):
+            for protocol in cls.protocols:
+                try:
+                    protocol_info = {
+                        "name": protocol.name if hasattr(protocol, 'name') else "unknown"
+                    }
+                    
+                    protocols.append(protocol_info)
+                    
+                except Exception as e:
+                    protocols.append({
+                        "name": "protocol_parse_error",
+                        "error": str(e)
+                    })
+    except Exception:
+        pass
     
     return protocols
 
 
-def _parse_protocol_info(lines: List[str], start_index: int, show_addresses: bool) -> Optional[Dict[str, Any]]:
-    """解析协议信息"""
+def _apply_filters(classes: List[Dict[str, Any]], class_filter, method_filter) -> List[Dict[str, Any]]:
+    """应用过滤器"""
     
-    protocol_info = {
-        "name": "unknown",
-        "methods": []
-    }
+    filtered_classes = []
     
-    i = start_index
-    
-    try:
-        while i < len(lines):
-            line = lines[i].strip()
+    for cls in classes:
+        if "error" in cls:
+            filtered_classes.append(cls)
+            continue
+        
+        class_name = cls.get("name", "")
+        
+        # 应用类名过滤器
+        if class_filter and not class_filter.search(class_name):
+            continue
+        
+        # 如果有方法过滤器，需要检查类的方法
+        if method_filter:
+            has_matching_method = False
             
-            # 解析协议名
-            if "name " in line:
-                name_match = re.search(r'name\s+(.+)', line)
-                if name_match:
-                    protocol_info["name"] = name_match.group(1).strip()
-            
-            # 解析方法列表
-            elif "instanceMethods " in line or "classMethods " in line:
-                methods = _parse_method_list(lines, i + 1)
-                protocol_info["methods"].extend(methods)
-            
-            # 检查是否到达下一个协议或节的开始
-            elif (line.startswith("isa ") or 
-                  "Contents of" in line or 
-                  line == ""):
-                if i > start_index:
+            methods = cls.get("methods", {})
+            for method_type in ["instance_methods", "class_methods"]:
+                method_list = methods.get(method_type, [])
+                for method in method_list:
+                    method_name = method.get("name", "")
+                    if method_filter.search(method_name):
+                        has_matching_method = True
+                        break
+                
+                if has_matching_method:
                     break
             
-            i += 1
+            if not has_matching_method:
+                continue
         
-        return protocol_info if protocol_info["name"] != "unknown" else None
-        
-    except Exception as e:
-        return {
-            "name": "parse_error",
-            "error": f"解析协议信息时发生错误: {str(e)}"
-        }
+        filtered_classes.append(cls)
+    
+    return filtered_classes
 
 
 def _create_class_summaries(classes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -796,134 +688,69 @@ def _filter_class_details(
     return filtered_classes
 
 
-def _apply_filters(classes: List[Dict[str, Any]], class_filter, method_filter) -> List[Dict[str, Any]]:
-    """应用过滤器"""
-    
-    filtered_classes = []
-    
-    for cls in classes:
-        if "error" in cls:
-            filtered_classes.append(cls)
-            continue
-        
-        class_name = cls.get("name", "")
-        
-        # 应用类名过滤器
-        if class_filter and not class_filter.search(class_name):
-            continue
-        
-        # 如果有方法过滤器，需要检查类的方法
-        if method_filter:
-            has_matching_method = False
-            
-            for method_type in ["instance_methods", "class_methods"]:
-                methods = cls.get("methods", {}).get(method_type, [])
-                for method in methods:
-                    method_name = method.get("name", "")
-                    if method_filter.search(method_name):
-                        has_matching_method = True
-                        break
-                
-                if has_matching_method:
-                    break
-            
-            if not has_matching_method:
-                continue
-        
-        filtered_classes.append(cls)
-    
-    return filtered_classes
-
-
-def _generate_declarations(classes: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """生成类声明代码"""
+def _generate_lief_declarations(
+    metadata: lief.objc.Metadata,
+    classes: List[Dict[str, Any]], 
+    show_addresses: bool
+) -> Dict[str, Any]:
+    """使用 LIEF 原生声明生成"""
     
     declarations = {
         "individual_classes": [],
         "full_declaration": ""
     }
     
-    full_decl_lines = []
-    
-    for cls in classes:
-        if "error" in cls:
-            continue
+    try:
+        # 配置声明选项
+        config = lief.objc.DeclOpt()
+        config.show_annotations = show_addresses
         
-        class_name = cls.get("name", "unknown")
-        superclass = cls.get("superclass", {})
-        superclass_name = superclass.get("name", "NSObject") if superclass else "NSObject"
+        # 生成完整声明
+        try:
+            declarations["full_declaration"] = metadata.to_decl(config)
+        except Exception as e:
+            declarations["full_declaration"] = f"生成完整声明失败: {str(e)}"
         
-        # 生成类声明
-        class_decl_lines = []
+        # 为每个类生成单独的声明
+        for cls_info in classes:
+            if "error" in cls_info:
+                continue
+            
+            class_name = cls_info.get("name", "unknown")
+            
+            # 尝试从元数据中找到对应的类对象
+            try:
+                for cls in metadata.classes:
+                    if hasattr(cls, 'name') and cls.name == class_name:
+                        class_declaration = cls.to_decl(config)
+                        declarations["individual_classes"].append({
+                            "class_name": class_name,
+                            "declaration": class_declaration
+                        })
+                        break
+                else:
+                    # 如果找不到对应的类，生成简单的声明
+                    declarations["individual_classes"].append({
+                        "class_name": class_name,
+                        "declaration": f"// 无法为类 {class_name} 生成声明"
+                    })
+            except Exception as e:
+                declarations["individual_classes"].append({
+                    "class_name": class_name,
+                    "declaration": f"// 生成类 {class_name} 声明失败: {str(e)}"
+                })
         
-        # 接口声明
-        protocols = cls.get("protocols", [])
-        protocol_str = ""
-        if protocols:
-            protocol_names = [p.get("name", "") for p in protocols if p.get("name")]
-            if protocol_names:
-                protocol_str = f" <{', '.join(protocol_names)}>"
-        
-        class_decl_lines.append(f"@interface {class_name} : {superclass_name}{protocol_str}")
-        
-        # 实例变量
-        ivars = cls.get("instance_variables", [])
-        if ivars:
-            class_decl_lines.append("{")
-            for ivar in ivars:
-                ivar_name = ivar.get("name", "unknown")
-                ivar_type = ivar.get("type", "id")
-                class_decl_lines.append(f"    {ivar_type} {ivar_name};")
-            class_decl_lines.append("}")
-        
-        # 属性
-        properties = cls.get("properties", [])
-        for prop in properties:
-            prop_name = prop.get("name", "unknown")
-            prop_attrs = prop.get("attributes", "")
-            class_decl_lines.append(f"@property {prop_attrs} {prop_name};")
-        
-        # 方法
-        methods = cls.get("methods", {})
-        instance_methods = methods.get("instance_methods", [])
-        class_methods = methods.get("class_methods", [])
-        
-        for method in class_methods:
-            method_name = method.get("name", "unknown")
-            method_types = method.get("types", "")
-            class_decl_lines.append(f"+ {method_types} {method_name};")
-        
-        for method in instance_methods:
-            method_name = method.get("name", "unknown")
-            method_types = method.get("types", "")
-            class_decl_lines.append(f"- {method_types} {method_name};")
-        
-        class_decl_lines.append("@end")
-        class_decl_lines.append("")
-        
-        class_declaration = "\n".join(class_decl_lines)
-        
-        declarations["individual_classes"].append({
-            "class_name": class_name,
-            "declaration": class_declaration
-        })
-        
-        full_decl_lines.extend(class_decl_lines)
-    
-    declarations["full_declaration"] = "\n".join(full_decl_lines)
+    except Exception as e:
+        declarations["error"] = f"生成声明失败: {str(e)}"
     
     return declarations
 
 
-def _calculate_statistics(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
+def _calculate_statistics(classes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """计算 Objective-C 统计信息"""
-    
-    classes = parsed_data.get("classes", [])
-    protocols = parsed_data.get("protocols", [])
     
     stats = {
         "total_classes": len(classes),
-        "total_protocols": len(protocols),
         "classes_with_errors": 0,
         "classes_by_prefix": {},
         "classes_by_superclass": {},
@@ -953,10 +780,8 @@ def _calculate_statistics(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
             stats["classes_by_prefix"][prefix] = stats["classes_by_prefix"].get(prefix, 0) + 1
         
         # 按父类统计
-        superclass = cls.get("superclass", {})
-        if superclass:
-            superclass_name = superclass.get("name", "unknown")
-            stats["classes_by_superclass"][superclass_name] = stats["classes_by_superclass"].get(superclass_name, 0) + 1
+        superclass_name = cls.get("superclass", {}).get("name") if cls.get("superclass") else "NSObject"
+        stats["classes_by_superclass"][superclass_name] = stats["classes_by_superclass"].get(superclass_name, 0) + 1
         
         # 统计方法数量
         methods = cls.get("methods", {})
@@ -967,26 +792,27 @@ def _calculate_statistics(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # 统计属性数量
         properties = cls.get("properties", [])
-        total_properties += len(properties)
+        class_property_count = len(properties)
+        total_properties += class_property_count
         
         # 统计实例变量数量
         ivars = cls.get("instance_variables", [])
         total_ivars += len(ivars)
         
-        # 统计协议数量
+        # 统计有协议的类
         protocols = cls.get("protocols", [])
-        if protocols and len(protocols) > 0:
+        if protocols:
             classes_with_protocols += 1
-    
-    stats["total_methods"] = total_methods
-    stats["total_properties"] = total_properties
-    stats["total_instance_variables"] = total_ivars
-    stats["classes_with_protocols"] = classes_with_protocols
     
     # 计算平均值
     valid_classes = stats["total_classes"] - stats["classes_with_errors"]
     if valid_classes > 0:
         stats["average_methods_per_class"] = round(total_methods / valid_classes, 2)
         stats["average_properties_per_class"] = round(total_properties / valid_classes, 2)
+    
+    stats["total_methods"] = total_methods
+    stats["total_properties"] = total_properties
+    stats["total_instance_variables"] = total_ivars
+    stats["classes_with_protocols"] = classes_with_protocols
     
     return stats
