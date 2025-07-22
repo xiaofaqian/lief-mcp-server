@@ -17,12 +17,12 @@ from .list_macho_imports import list_macho_imports
 from .list_macho_exports import list_macho_exports
 from .list_macho_libraries import list_macho_libraries
 from .get_macho_load_commands import get_macho_load_commands
-from .analyze_macho_objc_metadata import analyze_macho_objc_metadata
 from .disassemble_macho_code import disassemble_macho_code
 from .assemble_macho_code import assemble_macho_code
 from .add_macho_section import add_macho_section
 from .calculate_arm64_branch_target import calculate_arm64_branch_target
 from .calculate_address_offset import calculate_address_offset
+from .remove_macho_library import remove_macho_library
 
 
 # 导出所有工具函数
@@ -40,10 +40,10 @@ __all__ = [
     "get_macho_load_commands",
     "disassemble_macho_code",
     "assemble_macho_code",
-    "analyze_macho_objc_metadata",
     "add_macho_section",
     "calculate_arm64_branch_target",
-    "calculate_address_offset"
+    "calculate_address_offset",
+    "remove_macho_library"
 ]
 
 # 工具列表，便于动态注册
@@ -61,8 +61,8 @@ TOOLS = [
     get_macho_load_commands,
     disassemble_macho_code,
     assemble_macho_code,
-    analyze_macho_objc_metadata,
     add_macho_section,
     calculate_arm64_branch_target,
-    calculate_address_offset
+    calculate_address_offset,
+    remove_macho_library
 ]
