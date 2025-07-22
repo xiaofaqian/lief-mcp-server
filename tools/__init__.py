@@ -23,6 +23,7 @@ from .add_macho_section import add_macho_section
 from .calculate_arm64_branch_target import calculate_arm64_branch_target
 from .calculate_address_offset import calculate_address_offset
 from .remove_macho_library import remove_macho_library
+from .add_macho_library import add_macho_library
 
 
 # 导出所有工具函数
@@ -43,7 +44,8 @@ __all__ = [
     "add_macho_section",
     "calculate_arm64_branch_target",
     "calculate_address_offset",
-    "remove_macho_library"
+    "remove_macho_library",
+    "add_macho_library"
 ]
 
 # 工具列表，便于动态注册
@@ -64,5 +66,6 @@ TOOLS = [
     add_macho_section,
     calculate_arm64_branch_target,
     calculate_address_offset,
-    remove_macho_library
+    remove_macho_library,
+    add_macho_library
 ]

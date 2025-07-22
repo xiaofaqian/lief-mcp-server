@@ -16,20 +16,23 @@ def list_macho_libraries(
     file_path: Annotated[str, Field(
         description="Mach-O文件在系统中的完整绝对路径，例如：/Applications/MyApp.app/Contents/MacOS/MyApp 或 /usr/bin/ls 或 /bin/dyld"
     )],
+    name_filter: Annotated[str, Field(
+        description="依赖库名称过滤器，支持正则表达式匹配。例如：'Foundation' 或 '^/usr/lib/.*' 或 '.*dylib$'"
+    )],
     offset: Annotated[int, Field(
         description="起始位置偏移量，从第几个依赖库开始返回（从0开始计数）",
         ge=0
     )] = 0,
     count: Annotated[int, Field(
-        description="返回的依赖库数量，最大100条，0表示返回所有剩余依赖库",
+        description="返回的依赖库数量，最大20条，0表示返回所有剩余依赖库",
         ge=0,
-        le=100
+        le=20
     )] = 20,
-    name_filter: Annotated[Optional[str], Field(
-        description="依赖库名称过滤器，支持正则表达式匹配。例如：'Foundation' 或 '^/usr/lib/.*' 或 '.*dylib$'"
-    )] = None,
     include_analysis: Annotated[bool, Field(
         description="是否包含详细的库用途分析和特性说明"
+    )] = True,
+    simplified: Annotated[bool, Field(
+        description="是否使用简化模式，只返回核心信息（库名列表）。默认为True"
     )] = True
 ) -> Dict[str, Any]:
     """
@@ -79,7 +82,7 @@ def list_macho_libraries(
         # 遍历所有架构的库依赖信息
         for i, binary in enumerate(fat_binary):
             try:
-                arch_libraries = _extract_libraries_info(binary, i, offset, count, name_filter, include_analysis)
+                arch_libraries = _extract_libraries_info(binary, i, offset, count, name_filter, include_analysis, simplified)
                 result["architectures"].append(arch_libraries)
             except Exception as e:
                 result["architectures"].append({
@@ -102,8 +105,9 @@ def _extract_libraries_info(
     index: int, 
     offset: int = 0, 
     count: int = 20, 
-    name_filter: Optional[str] = None,
-    include_analysis: bool = True
+    name_filter: str = "",
+    include_analysis: bool = True,
+    simplified: bool = True
 ) -> Dict[str, Any]:
     """提取单个架构的库依赖详细信息，支持分页和过滤"""
     
@@ -135,7 +139,7 @@ def _extract_libraries_info(
             if regex_filter and not regex_filter.search(library_name):
                 continue
             
-            library_info = _extract_single_library_info(library, include_analysis)
+            library_info = _extract_single_library_info(library, include_analysis, simplified)
             all_libraries.append(library_info)
             
         except Exception as e:
@@ -169,38 +173,52 @@ def _extract_libraries_info(
     
     paged_libraries = all_libraries[offset:end_index]
     
-    # 基本架构信息
-    arch_info = {
-        "architecture_index": index,
-        "cpu_type": str(header.cpu_type),
-        "cpu_subtype": str(header.cpu_subtype),
-        "pagination_info": {
-            "total_libraries_in_binary": total_libraries_count,
-            "filtered_libraries_count": filtered_count,
-            "requested_offset": offset,
-            "requested_count": count,
-            "returned_count": len(paged_libraries),
-            "has_more": end_index < filtered_count,
-            "next_offset": end_index if end_index < filtered_count else None
-        },
-        "filter_info": {
-            "name_filter": name_filter,
-            "filter_applied": name_filter is not None,
-            "filter_valid": regex_filter is not None
-        },
-        "libraries": paged_libraries
-    }
-    
-    # 添加库依赖统计信息（基于所有过滤后的库依赖，不仅仅是当前页）
-    if include_analysis:
-        arch_info["library_statistics"] = _calculate_library_statistics(all_libraries)
+    # 简化模式：只返回核心信息
+    if simplified:
+        arch_info = {
+            "architecture_index": index,
+            "cpu_type": str(header.cpu_type),
+            "total_libraries": filtered_count,
+            "libraries": paged_libraries
+        }
+    else:
+        # 完整模式：返回所有详细信息
+        arch_info = {
+            "architecture_index": index,
+            "cpu_type": str(header.cpu_type),
+            "cpu_subtype": str(header.cpu_subtype),
+            "pagination_info": {
+                "total_libraries_in_binary": total_libraries_count,
+                "filtered_libraries_count": filtered_count,
+                "requested_offset": offset,
+                "requested_count": count,
+                "returned_count": len(paged_libraries),
+                "has_more": end_index < filtered_count,
+                "next_offset": end_index if end_index < filtered_count else None
+            },
+            "filter_info": {
+                "name_filter": name_filter,
+                "filter_applied": name_filter is not None,
+                "filter_valid": regex_filter is not None
+            },
+            "libraries": paged_libraries
+        }
+        
+        # 添加库依赖统计信息（基于所有过滤后的库依赖，不仅仅是当前页）
+        if include_analysis:
+            arch_info["library_statistics"] = _calculate_library_statistics(all_libraries)
     
     return arch_info
 
 
-def _extract_single_library_info(library, include_analysis: bool = True) -> Dict[str, Any]:
+def _extract_single_library_info(library, include_analysis: bool = True, simplified: bool = True) -> Dict[str, Any]:
     """提取单个库依赖的详细信息"""
     
+    # 简化模式：只返回库名
+    if simplified:
+        return {"name": library.name}
+    
+    # 完整模式：返回所有详细信息
     library_info = {
         "name": library.name,
         "current_version": _format_version(library.current_version),
