@@ -213,8 +213,10 @@ def _get_modified_instructions(binary: lief.MachO.Binary, address: int, count: i
             if i >= count:
                 break
             
-            # 格式化为简单的字符串：地址 指令
-            instruction_str = f"{hex(inst.address)} {inst.to_string()}"
+            # 格式化为简单的字符串：地址 指令（移除重复的地址）
+            instruction_str = f"{hex(inst.address)} {inst.mnemonic}"
+            if hasattr(inst, 'op_str') and inst.op_str:
+                instruction_str += f" {inst.op_str}"
             instructions.append(instruction_str)
         
     except Exception as e:
