@@ -101,22 +101,6 @@ def disassemble_macho_code(
         elif target_type == "section":
             result = _disassemble_by_section(binary, target_value, instruction_count, show_bytes)
         
-        # 添加文件和架构信息
-        result.update({
-            "file_path": file_path,
-            "architecture_info": {
-                "cpu_type": str(binary.header.cpu_type),
-                "cpu_subtype": str(binary.header.cpu_subtype),
-                "is_64bit": "64" in str(binary.header.cpu_type)
-            },
-            "disassembly_parameters": {
-                "target_type": target_type,
-                "target_value": target_value,
-                "instruction_count": instruction_count if target_type != "function" else "all",
-                "show_bytes": show_bytes
-            }
-        })
-        
         return result
         
     except Exception as e:
@@ -187,14 +171,8 @@ def _disassemble_by_address(binary: lief.MachO.Binary, address_str: str, instruc
         
         return {
             "status": "success",
-            "disassembly_type": "address",
-            "start_address": {
-                "value": address,
-                "hex": hex(address)
-            },
             "instruction_count": len(instructions),
-            "instructions": instructions,
-            "analysis": _analyze_instructions(instructions)
+            "instructions": '\n'.join(instructions)
         }
         
     except ValueError as e:
@@ -283,16 +261,8 @@ def _disassemble_by_function(binary: lief.MachO.Binary, function_name: str, show
         
         return {
             "status": "success",
-            "disassembly_type": "function",
-            "function_name": function_name,
-            "function_address": {
-                "value": function_address,
-                "hex": hex(function_address)
-            },
             "instruction_count": len(instructions),
-            "instructions": instructions,
-            "analysis": _analyze_instructions(instructions),
-            "function_analysis": _analyze_function(instructions, function_name)
+            "instructions": '\n'.join(instructions)
         }
         
     except Exception as e:
@@ -367,22 +337,8 @@ def _disassemble_by_section(binary: lief.MachO.Binary, section_name: str, instru
         
         return {
             "status": "success",
-            "disassembly_type": "section",
-            "section_info": {
-                "name": target_section.name,
-                "segment": target_segment.name,
-                "virtual_address": {
-                    "value": section_address,
-                    "hex": hex(section_address)
-                },
-                "size": {
-                    "value": target_section.size,
-                    "hex": hex(target_section.size)
-                }
-            },
             "instruction_count": len(instructions),
-            "instructions": instructions,
-            "analysis": _analyze_instructions(instructions)
+            "instructions": '\n'.join(instructions)
         }
         
     except Exception as e:
@@ -392,8 +348,8 @@ def _disassemble_by_section(binary: lief.MachO.Binary, section_name: str, instru
         }
 
 
-def _extract_instruction_info(inst, show_bytes: bool) -> Dict[str, Any]:
-    """提取单条指令的详细信息"""
+def _extract_instruction_info(inst, show_bytes: bool) -> str:
+    """提取单条指令的简洁信息，返回格式化字符串"""
     
     # 获取操作数信息
     operands_str = ""
@@ -411,95 +367,46 @@ def _extract_instruction_info(inst, show_bytes: bool) -> Dict[str, Any]:
     except Exception:
         operands_str = ""
     
-    inst_info = {
-        "address": {
-            "value": inst.address,
-            "hex": hex(inst.address)
-        },
-        "mnemonic": inst.mnemonic,
-        "operands": operands_str,
-        "full_instruction": inst.to_string()
-    }
+    # 格式化地址
+    address_hex = f"0x{inst.address:08x}"
     
-    # 添加原始字节码
+    # 获取机器指令字节码
+    bytes_str = ""
     if show_bytes:
         try:
             if hasattr(inst, 'raw') and inst.raw:
                 raw_bytes = list(inst.raw)
-                inst_info["bytes"] = {
-                    "raw": raw_bytes,
-                    "hex": ' '.join(f'{b:02x}' for b in raw_bytes),
-                    "size": len(raw_bytes)
-                }
+                # 按4字节对齐，不足4字节则补零
+                bytes_to_show = raw_bytes[:4]
+                # 补零到4字节
+                while len(bytes_to_show) < 4:
+                    bytes_to_show.append(0)
+                # 格式化为两个字节一组，中间留空格
+                byte_pairs = []
+                for i in range(0, len(bytes_to_show), 2):
+                    if i + 1 < len(bytes_to_show):
+                        byte_pairs.append(f'{bytes_to_show[i]:02x}{bytes_to_show[i+1]:02x}')
+                    else:
+                        byte_pairs.append(f'{bytes_to_show[i]:02x}00')
+                bytes_str = ' '.join(byte_pairs)
             elif hasattr(inst, 'size') and inst.size > 0:
-                # 如果没有原始字节但有大小信息
-                inst_info["bytes"] = {
-                    "size": inst.size,
-                    "note": "原始字节码不可用"
-                }
+                bytes_str = "N/A"
         except Exception:
-            inst_info["bytes"] = {"error": "无法获取指令字节码"}
+            bytes_str = "N/A"
     
-    # 添加指令特性分析
-    inst_info["properties"] = _analyze_instruction_properties(inst)
+    # 组合指令字符串
+    if operands_str:
+        instruction_str = f"{inst.mnemonic} {operands_str}"
+    else:
+        instruction_str = inst.mnemonic
     
-    return inst_info
+    # 返回格式化的字符串
+    if show_bytes and bytes_str:
+        return f"{address_hex} {instruction_str} {bytes_str}"
+    else:
+        return f"{address_hex} {instruction_str}"
 
 
-def _analyze_instruction_properties(inst) -> Dict[str, Any]:
-    """分析指令的特性"""
-    
-    properties = {
-        "is_branch": False,
-        "is_call": False,
-        "is_return": False,
-        "is_jump": False,
-        "is_conditional": False,
-        "instruction_type": "unknown"
-    }
-    
-    try:
-        # 检查指令特性
-        if hasattr(inst, 'is_branch') and inst.is_branch:
-            properties["is_branch"] = True
-            properties["instruction_type"] = "branch"
-            
-            if hasattr(inst, 'branch_target'):
-                properties["branch_target"] = {
-                    "value": inst.branch_target,
-                    "hex": hex(inst.branch_target)
-                }
-        
-        # 基于助记符分析指令类型
-        mnemonic = inst.mnemonic.lower()
-        
-        if mnemonic in ['call', 'bl', 'blr']:
-            properties["is_call"] = True
-            properties["instruction_type"] = "call"
-        elif mnemonic in ['ret', 'retq', 'return']:
-            properties["is_return"] = True
-            properties["instruction_type"] = "return"
-        elif mnemonic.startswith('j') or mnemonic in ['b', 'br']:
-            properties["is_jump"] = True
-            if mnemonic in ['jz', 'jnz', 'je', 'jne', 'jl', 'jg', 'beq', 'bne', 'blt', 'bgt']:
-                properties["is_conditional"] = True
-                properties["instruction_type"] = "conditional_jump"
-            else:
-                properties["instruction_type"] = "unconditional_jump"
-        elif mnemonic in ['mov', 'movq', 'movl', 'ldr', 'str']:
-            properties["instruction_type"] = "data_movement"
-        elif mnemonic in ['add', 'sub', 'mul', 'div', 'and', 'or', 'xor']:
-            properties["instruction_type"] = "arithmetic_logic"
-        elif mnemonic in ['push', 'pop']:
-            properties["instruction_type"] = "stack_operation"
-        elif mnemonic in ['nop']:
-            properties["instruction_type"] = "nop"
-        
-    except Exception:
-        # 如果分析失败，保持默认值
-        pass
-    
-    return properties
 
 
 def _is_valid_address(binary: lief.MachO.Binary, address: int) -> bool:
@@ -587,112 +494,3 @@ def _get_available_code_sections(binary: lief.MachO.Binary) -> List[Dict[str, st
                 })
     
     return code_sections
-
-
-def _analyze_instructions(instructions: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """分析指令序列"""
-    
-    analysis = {
-        "total_instructions": len(instructions),
-        "instruction_types": {},
-        "branch_instructions": 0,
-        "call_instructions": 0,
-        "return_instructions": 0,
-        "data_movement_instructions": 0,
-        "arithmetic_instructions": 0,
-        "address_range": {},
-        "unique_mnemonics": set()
-    }
-    
-    if not instructions:
-        return analysis
-    
-    # 地址范围
-    addresses = [inst["address"]["value"] for inst in instructions]
-    analysis["address_range"] = {
-        "start": {
-            "value": min(addresses),
-            "hex": hex(min(addresses))
-        },
-        "end": {
-            "value": max(addresses),
-            "hex": hex(max(addresses))
-        },
-        "span": max(addresses) - min(addresses)
-    }
-    
-    # 统计指令类型
-    for inst in instructions:
-        mnemonic = inst["mnemonic"]
-        analysis["unique_mnemonics"].add(mnemonic)
-        
-        if "properties" in inst:
-            props = inst["properties"]
-            inst_type = props.get("instruction_type", "unknown")
-            analysis["instruction_types"][inst_type] = analysis["instruction_types"].get(inst_type, 0) + 1
-            
-            if props.get("is_branch"):
-                analysis["branch_instructions"] += 1
-            if props.get("is_call"):
-                analysis["call_instructions"] += 1
-            if props.get("is_return"):
-                analysis["return_instructions"] += 1
-            if inst_type == "data_movement":
-                analysis["data_movement_instructions"] += 1
-            if inst_type == "arithmetic_logic":
-                analysis["arithmetic_instructions"] += 1
-    
-    analysis["unique_mnemonics"] = sorted(list(analysis["unique_mnemonics"]))
-    
-    return analysis
-
-
-def _analyze_function(instructions: List[Dict[str, Any]], function_name: str) -> Dict[str, Any]:
-    """分析函数特性"""
-    
-    analysis = {
-        "function_name": function_name,
-        "estimated_size": 0,
-        "has_prologue": False,
-        "has_epilogue": False,
-        "stack_operations": 0,
-        "external_calls": 0,
-        "complexity_score": 0
-    }
-    
-    if not instructions:
-        return analysis
-    
-    # 计算函数大小
-    if len(instructions) > 1:
-        start_addr = instructions[0]["address"]["value"]
-        end_addr = instructions[-1]["address"]["value"]
-        analysis["estimated_size"] = end_addr - start_addr
-    
-    # 检查函数序言和尾声
-    if len(instructions) > 0:
-        first_inst = instructions[0]["mnemonic"].lower()
-        if first_inst in ['push', 'sub', 'stp']:  # 常见的函数序言
-            analysis["has_prologue"] = True
-    
-    if len(instructions) > 0:
-        last_inst = instructions[-1]["mnemonic"].lower()
-        if last_inst in ['ret', 'pop', 'ldp']:  # 常见的函数尾声
-            analysis["has_epilogue"] = True
-    
-    # 统计特殊操作
-    for inst in instructions:
-        mnemonic = inst["mnemonic"].lower()
-        if mnemonic in ['push', 'pop', 'sub', 'add'] and 'sp' in inst.get("operands", "").lower():
-            analysis["stack_operations"] += 1
-        if inst.get("properties", {}).get("is_call"):
-            analysis["external_calls"] += 1
-    
-    # 计算复杂度分数（简单的启发式）
-    analysis["complexity_score"] = (
-        len(instructions) +
-        analysis["external_calls"] * 2 +
-        analysis["stack_operations"]
-    )
-    
-    return analysis

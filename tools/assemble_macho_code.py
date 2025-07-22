@@ -22,22 +22,13 @@ def assemble_macho_code(
         description="要替换指令的目标虚拟地址，支持十六进制格式（如0x100001000）或十进制格式"
     )],
     assembly_code: Annotated[str, Field(
-        description="要插入的汇编代码，支持多行指令。例如：'mov x0, #0x1234; ret' 或 'nop; nop; nop'"
+        description="要插入的汇编代码，支持多行指令。如果是多行指令，请使用换行符分隔，例如：'mov x0, #0x1234\\nret' 或 'nop\\nnop\\nnop'"
     )],
     architecture: Annotated[str, Field(
         description="指定架构类型，如 'x86_64'、'arm64' 等。如果不指定，将使用默认架构"
     )] = "",
-    output_path: Annotated[str, Field(
-        description="修改后文件的输出路径。如果不指定，将直接覆盖原文件"
-    )] = "",
     backup_original: Annotated[bool, Field(
         description="是否备份原始文件。如果为True，将创建带时间戳和唯一ID的备份文件"
-    )] = True,
-    verify_assembly: Annotated[bool, Field(
-        description="是否验证汇编结果。如果为True，将反汇编修改后的代码进行验证"
-    )] = True,
-    remove_signature: Annotated[bool, Field(
-        description="是否移除代码签名。修改代码后通常需要移除原有签名"
     )] = True
 ) -> Dict[str, Any]:
     """
@@ -46,8 +37,6 @@ def assemble_macho_code(
     该工具提供以下功能：
     - 在指定虚拟地址处替换汇编指令
     - 支持多种架构（x86_64、arm64等）
-    - 自动处理代码签名移除
-    - 提供汇编结果验证
     - 支持原文件备份
     - 使用 LIEF 库，确保二进制文件完整性
     
@@ -95,10 +84,6 @@ def assemble_macho_code(
                 "suggestion": "请使用十六进制格式（如 0x100001000）或十进制格式"
             }
         
-        # 设置输出路径 - 如果没有指定，直接覆盖原文件
-        if not output_path:
-            output_path = file_path
-        
         # 备份原始文件
         backup_path = None
         if backup_original:
@@ -143,9 +128,6 @@ def assemble_macho_code(
                 "suggestion": "请检查地址是否正确，或使用 list_macho_segments 工具查看可用的代码段"
             }
         
-        # 获取原始指令（用于验证和回滚）
-        original_instructions = _get_original_instructions(binary, address, 5)
-        
         # 执行汇编操作 - 直接使用原始汇编代码，LIEF 支持多行汇编
         try:
             # 使用 LIEF 的 assemble 方法，直接传递多行汇编代码
@@ -154,66 +136,36 @@ def assemble_macho_code(
         except Exception as e:
             return {
                 "error": f"汇编操作失败: {str(e)}",
-                "original_instructions": original_instructions,
                 "assembly_code": assembly_code.strip(),
                 "suggestion": "请检查汇编语法是否正确，或尝试简化指令"
             }
-        
-        # 移除代码签名（如果需要）
-        signature_removed = False
-        if remove_signature:
-            try:
-                if hasattr(binary, 'remove_signature'):
-                    binary.remove_signature()
-                    signature_removed = True
-                elif hasattr(fat_binary, 'remove_signature'):
-                    fat_binary.remove_signature()
-                    signature_removed = True
-            except Exception as e:
-                # 签名移除失败不是致命错误
-                pass
         
         # 写入修改后的文件
         try:
             if len(fat_binary) == 1:
                 # 单架构文件
-                binary.write(output_path)
+                binary.write(file_path)
             else:
                 # Fat Binary 文件
-                fat_binary.write(output_path)
+                fat_binary.write(file_path)
                 
         except Exception as e:
             return {
                 "error": f"写入修改后的文件失败: {str(e)}",
-                "suggestion": "请检查输出路径权限或磁盘空间"
+                "suggestion": "请检查文件权限或磁盘空间"
             }
         
-        # 验证汇编结果
-        verification_result = None
-        if verify_assembly:
-            verification_result = _verify_assembly_result(output_path, address, architecture)
+        # 获取修改后的指令用于返回
+        modified_instructions = _get_modified_instructions(binary, address, 5)
         
-        # 构建结果
+        # 构建简化的结果
         result = {
             "status": "success",
-            "operation": "assemble_code",
-            "file_info": {
-                "original_file": file_path,
-                "output_file": output_path,
-                "backup_file": backup_path if backup_original else None
-            },
-            "modification_details": {
-                "target_address": {
-                    "value": address,
-                    "hex": hex(address)
-                },
-                "original_assembly": assembly_code.strip(),
-                "architecture": str(binary.header.cpu_type)
-            },
-            "original_instructions": original_instructions,
-            "signature_removed": signature_removed,
-            "verification": verification_result
+            "modified_instructions": modified_instructions
         }
+        
+        if backup_path:
+            result["backup_file"] = backup_path
         
         return result
         
@@ -249,10 +201,10 @@ def _is_valid_address(binary: lief.MachO.Binary, address: int) -> bool:
     return True
 
 
-def _get_original_instructions(binary: lief.MachO.Binary, address: int, count: int = 5) -> List[Dict[str, Any]]:
-    """获取原始指令（用于备份和验证）"""
+def _get_modified_instructions(binary: lief.MachO.Binary, address: int, count: int = 5) -> str:
+    """获取修改后的指令，返回简单的字符串格式"""
     
-    original_instructions = []
+    instructions = []
     
     try:
         instruction_iter = binary.disassemble(address)
@@ -261,136 +213,13 @@ def _get_original_instructions(binary: lief.MachO.Binary, address: int, count: i
             if i >= count:
                 break
             
-            inst_info = {
-                "address": {
-                    "value": inst.address,
-                    "hex": hex(inst.address)
-                },
-                "mnemonic": inst.mnemonic,
-                "full_instruction": inst.to_string()
-            }
-            
-            # 尝试获取原始字节码
-            try:
-                if hasattr(inst, 'raw') and inst.raw:
-                    raw_bytes = list(inst.raw)
-                    inst_info["bytes"] = {
-                        "raw": raw_bytes,
-                        "hex": ' '.join(f'{b:02x}' for b in raw_bytes),
-                        "size": len(raw_bytes)
-                    }
-            except Exception:
-                pass
-            
-            original_instructions.append(inst_info)
+            # 格式化为简单的字符串：地址 指令
+            instruction_str = f"{hex(inst.address)} {inst.to_string()}"
+            instructions.append(instruction_str)
         
     except Exception as e:
-        # 如果无法获取原始指令，返回错误信息
-        original_instructions = [{
-            "error": f"无法获取原始指令: {str(e)}"
-        }]
+        # 如果无法获取指令，返回错误信息
+        return f"错误: 无法获取修改后的指令 - {str(e)}"
     
-    return original_instructions
-
-
-def _verify_assembly_result(output_path: str, address: int, architecture: str) -> Dict[str, Any]:
-    """验证汇编结果"""
-    
-    verification = {
-        "verified": False,
-        "new_instructions": [],
-        "error": None
-    }
-    
-    try:
-        # 重新解析修改后的文件
-        fat_binary = lief.MachO.parse(output_path)
-        if fat_binary is None:
-            verification["error"] = "无法解析修改后的文件"
-            return verification
-        
-        # 选择架构
-        binary = _select_architecture(fat_binary, architecture)
-        if binary is None:
-            verification["error"] = "无法找到指定架构"
-            return verification
-        
-        # 反汇编修改后的指令
-        instruction_iter = binary.disassemble(address)
-        
-        for i, inst in enumerate(instruction_iter):
-            if i >= 5:  # 只验证前5条指令
-                break
-            
-            inst_info = {
-                "address": {
-                    "value": inst.address,
-                    "hex": hex(inst.address)
-                },
-                "mnemonic": inst.mnemonic,
-                "full_instruction": inst.to_string()
-            }
-            
-            verification["new_instructions"].append(inst_info)
-        
-        verification["verified"] = True
-        
-    except Exception as e:
-        verification["error"] = f"验证过程中发生错误: {str(e)}"
-    
-    return verification
-
-
-def _analyze_assembly_impact(original_instructions: List[Dict[str, Any]], 
-                           new_instructions: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """分析汇编修改的影响"""
-    
-    analysis = {
-        "instructions_changed": 0,
-        "bytes_changed": 0,
-        "instruction_comparison": [],
-        "potential_issues": []
-    }
-    
-    try:
-        # 比较指令
-        max_len = max(len(original_instructions), len(new_instructions))
-        
-        for i in range(max_len):
-            comparison = {"index": i}
-            
-            if i < len(original_instructions):
-                comparison["original"] = original_instructions[i]
-            else:
-                comparison["original"] = None
-            
-            if i < len(new_instructions):
-                comparison["new"] = new_instructions[i]
-            else:
-                comparison["new"] = None
-            
-            # 检查是否有变化
-            if comparison["original"] and comparison["new"]:
-                if (comparison["original"].get("full_instruction") != 
-                    comparison["new"].get("full_instruction")):
-                    comparison["changed"] = True
-                    analysis["instructions_changed"] += 1
-                else:
-                    comparison["changed"] = False
-            else:
-                comparison["changed"] = True
-                analysis["instructions_changed"] += 1
-            
-            analysis["instruction_comparison"].append(comparison)
-        
-        # 检查潜在问题
-        if analysis["instructions_changed"] == 0:
-            analysis["potential_issues"].append("没有检测到指令变化，汇编可能未生效")
-        
-        if len(new_instructions) > len(original_instructions):
-            analysis["potential_issues"].append("新指令数量超过原始指令，可能覆盖了后续代码")
-        
-    except Exception as e:
-        analysis["error"] = f"分析过程中发生错误: {str(e)}"
-    
-    return analysis
+    # 将指令列表连接为多行字符串
+    return "\n".join(instructions)

@@ -16,8 +16,6 @@ from .list_macho_symbols import list_macho_symbols
 from .list_macho_imports import list_macho_imports
 from .list_macho_exports import list_macho_exports
 from .list_macho_libraries import list_macho_libraries
-from .get_macho_dyld_info import get_macho_dyld_info
-from .list_macho_relocations import list_macho_relocations
 from .get_macho_load_commands import get_macho_load_commands
 from .analyze_macho_objc_metadata import analyze_macho_objc_metadata
 from .disassemble_macho_code import disassemble_macho_code
@@ -39,8 +37,6 @@ __all__ = [
     "list_macho_imports",
     "list_macho_exports",
     "list_macho_libraries",
-    "get_macho_dyld_info",
-    "list_macho_relocations",
     "get_macho_load_commands",
     "disassemble_macho_code",
     "assemble_macho_code",
@@ -62,8 +58,6 @@ TOOLS = [
     list_macho_imports,
     list_macho_exports,
     list_macho_libraries,
-    get_macho_dyld_info,
-    list_macho_relocations,
     get_macho_load_commands,
     disassemble_macho_code,
     assemble_macho_code,
