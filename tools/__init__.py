@@ -7,12 +7,11 @@ LIEF MCP服务器工具包
 
 # 导入工具函数
 from .parse_macho_info import parse_macho_info
-from .list_macho_architectures import list_macho_architectures
 from .get_macho_header import get_macho_header
 from .list_macho_segments import list_macho_segments
 from .list_macho_sections import list_macho_sections
-from .get_macho_section_content import get_macho_section_content
 from .list_macho_symbols import list_macho_symbols
+from .list_macho_relocations import list_macho_relocations
 from .list_macho_imports import list_macho_imports
 from .list_macho_exports import list_macho_exports
 from .list_macho_libraries import list_macho_libraries
@@ -26,15 +25,15 @@ from .remove_macho_library import remove_macho_library
 from .add_macho_library import add_macho_library
 
 
+
 # 导出所有工具函数
 __all__ = [
     "parse_macho_info",
-    "list_macho_architectures",
     "get_macho_header",
     "list_macho_segments",
     "list_macho_sections",
-    "get_macho_section_content",
     "list_macho_symbols",
+    "list_macho_relocations",
     "list_macho_imports",
     "list_macho_exports",
     "list_macho_libraries",
@@ -51,12 +50,11 @@ __all__ = [
 # 工具列表，便于动态注册
 TOOLS = [
     parse_macho_info,
-    list_macho_architectures,
     get_macho_header,
     list_macho_segments,
     list_macho_sections,
-    get_macho_section_content,
     list_macho_symbols,
+    list_macho_relocations,
     list_macho_imports,
     list_macho_exports,
     list_macho_libraries,

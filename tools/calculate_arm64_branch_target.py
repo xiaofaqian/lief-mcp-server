@@ -21,7 +21,7 @@ def calculate_arm64_branch_target(
         description="输入格式：'auto'(自动检测)、'hex'(十六进制)、'dec'(十进制)。默认为'auto'"
     )] = "auto",
     instruction_type: Annotated[str, Field(
-        description="指令类型：'bl'(Branch with Link)、'b'(Branch)、'adr'(Address)、'bl_raw'(原始bl偏移×4)、'b_raw'(原始b偏移×4)、'custom'(自定义)。默认为'bl'"
+        description="指令类型：'bl'(Branch with Link)、'b'(Branch)、'adr'(Address)、'adrp'(Address Page)、'bl_raw'(原始bl偏移×4)、'b_raw'(原始b偏移×4)、'custom'(自定义)。默认为'bl'"
     )] = "bl",
     custom_multiplier: Annotated[int, Field(
         description="自定义偏移量倍数，仅在instruction_type='custom'时使用。默认为4",
@@ -61,10 +61,10 @@ def calculate_arm64_branch_target(
                 "suggestion": "请使用 'auto'、'hex' 或 'dec' 中的一个"
             }
         
-        if instruction_type not in ["bl", "b", "adr", "bl_raw", "b_raw", "custom"]:
+        if instruction_type not in ["bl", "b", "adr", "adrp", "bl_raw", "b_raw", "custom"]:
             return {
                 "error": f"无效的指令类型: {instruction_type}",
-                "suggestion": "请使用 'bl'、'b'、'adr'、'bl_raw'、'b_raw' 或 'custom' 中的一个"
+                "suggestion": "请使用 'bl'、'b'、'adr'、'adrp'、'bl_raw'、'b_raw' 或 'custom' 中的一个"
             }
         
         # 解析当前地址
@@ -85,14 +85,23 @@ def calculate_arm64_branch_target(
                 "suggestion": "请检查偏移量格式，支持十六进制（0x78E08）或十进制（494872），可以为负数"
             }
         
-        # 确定偏移量倍数
-        multiplier = _get_instruction_multiplier(instruction_type, custom_multiplier)
-        
         # 计算目标地址
         current_addr_value = current_addr_result["value"]
         offset_value = offset_result["value"]
-        byte_offset = offset_value * multiplier
-        target_address = current_addr_value + byte_offset
+        
+        # 根据指令类型计算目标地址
+        if instruction_type == "adrp":
+            # ADRP: 目标地址 = (PC & ~0xFFF) + 立即数
+            # 立即数已经是页面偏移量，不需要额外处理
+            page_aligned_pc = current_addr_value & ~0xFFF
+            target_address = page_aligned_pc + offset_value
+            multiplier = 1  # 用于显示目的
+            byte_offset = offset_value
+        else:
+            # 其他指令类型使用原有逻辑
+            multiplier = _get_instruction_multiplier(instruction_type, custom_multiplier)
+            byte_offset = offset_value * multiplier
+            target_address = current_addr_value + byte_offset
         
         # 确保目标地址为正数
         if target_address < 0:
@@ -134,16 +143,10 @@ def calculate_arm64_branch_target(
                 "value": target_address,
                 "hex": hex(target_address)
             },
-            "calculation_process": {
-                "formula": f"{hex(current_addr_value)} + ({offset_value} × {multiplier}) = {hex(target_address)}",
-                "step_by_step": [
-                    f"当前地址: {hex(current_addr_value)}",
-                    f"偏移量: {offset_value} ({'负向' if offset_value < 0 else '正向'})",
-                    f"指令倍数: {multiplier} ({'字节' if multiplier == 1 else '字(4字节)' if multiplier == 4 else f'{multiplier}字节'})",
-                    f"字节偏移: {offset_value} × {multiplier} = {byte_offset}",
-                    f"目标地址: {hex(current_addr_value)} + {byte_offset} = {hex(target_address)}"
-                ]
-            },
+            "calculation_process": _get_calculation_process(
+                instruction_type, current_addr_value, offset_value, multiplier, 
+                byte_offset, target_address
+            ),
             "analysis": {
                 "byte_offset": byte_offset,
                 "direction": "backward" if offset_value < 0 else "forward",
@@ -164,6 +167,10 @@ def calculate_arm64_branch_target(
         elif instruction_type == "adr":
             result["instruction_analysis"] = _analyze_adr_instruction(
                 current_addr_value, target_address
+            )
+        elif instruction_type == "adrp":
+            result["instruction_analysis"] = _analyze_adrp_instruction(
+                current_addr_value, target_address, offset_value
             )
         
         return result
@@ -300,10 +307,86 @@ def _get_instruction_description(instruction_type: str) -> str:
         "bl": "Branch with Link - 带链接的分支指令，用于函数调用",
         "b": "Branch - 无条件分支指令，用于跳转",
         "adr": "Address - 地址计算指令，计算相对地址",
+        "adrp": "Address Page - 页面地址计算指令，计算4KB页面对齐的地址",
         "custom": "Custom - 自定义指令类型"
     }
     
     return descriptions.get(instruction_type, "未知指令类型")
+
+
+def _get_calculation_process(instruction_type: str, current_addr: int, offset_value: int, 
+                           multiplier: int, byte_offset: int, target_address: int) -> Dict[str, Any]:
+    """获取计算过程的详细信息"""
+    
+    if instruction_type == "adrp":
+        page_aligned_pc = current_addr & ~0xFFF
+        return {
+            "formula": f"({hex(current_addr)} & ~0xFFF) + {offset_value} = {hex(target_address)}",
+            "step_by_step": [
+                f"当前地址: {hex(current_addr)}",
+                f"页面对齐地址: {hex(current_addr)} & ~0xFFF = {hex(page_aligned_pc)}",
+                f"立即数(页面偏移): {offset_value} (0x{offset_value:x})",
+                f"目标地址: {hex(page_aligned_pc)} + {offset_value} = {hex(target_address)}",
+                f"页面数: {offset_value // 4096} 页面 (验证: {offset_value} ÷ 4096)"
+            ]
+        }
+    else:
+        return {
+            "formula": f"{hex(current_addr)} + ({offset_value} × {multiplier}) = {hex(target_address)}",
+            "step_by_step": [
+                f"当前地址: {hex(current_addr)}",
+                f"偏移量: {offset_value} ({'负向' if offset_value < 0 else '正向'})",
+                f"指令倍数: {multiplier} ({'字节' if multiplier == 1 else '字(4字节)' if multiplier == 4 else f'{multiplier}字节'})",
+                f"字节偏移: {offset_value} × {multiplier} = {byte_offset}",
+                f"目标地址: {hex(current_addr)} + {byte_offset} = {hex(target_address)}"
+            ]
+        }
+
+
+def _analyze_adrp_instruction(current_addr: int, target_addr: int, imm_value: int) -> Dict[str, Any]:
+    """分析 ADRP 指令的特性"""
+    
+    page_aligned_pc = current_addr & ~0xFFF
+    page_count = imm_value // 4096
+    
+    analysis = {
+        "instruction_type": "adrp",
+        "page_aligned_pc": page_aligned_pc,
+        "immediate_value": imm_value,
+        "page_count": page_count,
+        "target_alignment": target_addr % 4096 == 0,
+        "likely_purpose": "计算页面对齐的地址，通常用于访问全局变量或函数指针"
+    }
+    
+    # 分析页面偏移
+    if page_count == 0:
+        analysis["page_description"] = "同一页面内"
+    elif page_count > 0:
+        analysis["page_description"] = f"向前 {page_count} 个页面"
+    else:
+        analysis["page_description"] = f"向后 {abs(page_count)} 个页面"
+    
+    # 分析地址范围
+    distance = abs(target_addr - page_aligned_pc)
+    if distance < 1024 * 1024:  # 1MB
+        analysis["distance_category"] = "near"
+        analysis["distance_description"] = f"近距离访问 ({distance // 1024}KB)"
+    elif distance < 1024 * 1024 * 1024:  # 1GB
+        analysis["distance_category"] = "medium"
+        analysis["distance_description"] = f"中距离访问 ({distance // (1024 * 1024)}MB)"
+    else:
+        analysis["distance_category"] = "far"
+        analysis["distance_description"] = f"远距离访问 ({distance // (1024 * 1024 * 1024)}GB)"
+    
+    # 验证计算
+    analysis["calculation_verification"] = {
+        "page_aligned_pc_hex": hex(page_aligned_pc),
+        "immediate_hex": hex(imm_value),
+        "target_hex": hex(target_addr),
+        "formula_check": f"({hex(current_addr)} & ~0xFFF) + 0x{imm_value:x} = {hex(target_addr)}"
+    }
+    
+    return analysis
 
 
 def _analyze_branch_instruction(current_addr: int, target_addr: int, instruction_type: str) -> Dict[str, Any]:
