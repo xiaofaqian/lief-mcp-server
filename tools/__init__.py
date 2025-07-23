@@ -23,7 +23,8 @@ from .calculate_arm64_branch_target import calculate_arm64_branch_target
 from .calculate_address_offset import calculate_address_offset
 from .remove_macho_library import remove_macho_library
 from .add_macho_library import add_macho_library
-
+from .find_got_symbol_by_address import find_got_symbol_by_address
+from .replace_macho_symbol import replace_macho_symbol
 
 
 # 导出所有工具函数
@@ -44,7 +45,9 @@ __all__ = [
     "calculate_arm64_branch_target",
     "calculate_address_offset",
     "remove_macho_library",
-    "add_macho_library"
+    "add_macho_library",
+    "find_got_symbol_by_address",
+    "replace_macho_symbol"
 ]
 
 # 工具列表，便于动态注册
@@ -65,5 +68,7 @@ TOOLS = [
     calculate_arm64_branch_target,
     calculate_address_offset,
     remove_macho_library,
-    add_macho_library
+    add_macho_library,
+    find_got_symbol_by_address,
+    replace_macho_symbol
 ]
