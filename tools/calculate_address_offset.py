@@ -7,7 +7,8 @@
 
 from typing import Annotated, Dict, Any
 from pydantic import Field
-import re
+
+from .common import parse_number
 
 
 def calculate_address_offset(
@@ -64,27 +65,23 @@ def calculate_address_offset(
                 "suggestion": "请使用 'all'、'hex'、'dec' 或 'signed_dec' 中的一个"
             }
         
-        # 解析当前地址
-        current_addr_result = _parse_address(current_address.strip(), input_format)
-        if "error" in current_addr_result:
+        current_addr_value, current_format, parse_error = parse_number(current_address.strip(), input_format)
+        if parse_error:
             return {
-                "error": f"解析当前地址失败: {current_addr_result['error']}",
+                "error": f"解析当前地址失败: {parse_error['error']}",
                 "input_address": current_address,
                 "suggestion": "请检查地址格式，支持十六进制（0x100001000）或十进制（4295000072）"
             }
         
-        # 解析目标地址
-        target_addr_result = _parse_address(target_address.strip(), input_format)
-        if "error" in target_addr_result:
+        target_addr_value, target_format, target_error = parse_number(target_address.strip(), input_format)
+        if target_error:
             return {
-                "error": f"解析目标地址失败: {target_addr_result['error']}",
+                "error": f"解析目标地址失败: {target_error['error']}",
                 "input_address": target_address,
                 "suggestion": "请检查地址格式，支持十六进制（0x100007008）或十进制（4295024648）"
             }
         
         # 计算偏移量
-        current_addr_value = current_addr_result["value"]
-        target_addr_value = target_addr_result["value"]
         offset = target_addr_value - current_addr_value
         
         # 构建详细结果
@@ -94,13 +91,13 @@ def calculate_address_offset(
                 "current_address": {
                     "value": current_addr_value,
                     "hex": hex(current_addr_value),
-                    "input_format": current_addr_result["detected_format"],
+                    "input_format": current_format,
                     "original_input": current_address
                 },
                 "target_address": {
                     "value": target_addr_value,
                     "hex": hex(target_addr_value),
-                    "input_format": target_addr_result["detected_format"],
+                    "input_format": target_format,
                     "original_input": target_address
                 }
             },
@@ -186,56 +183,3 @@ def calculate_address_offset(
             },
             "suggestion": "请检查输入参数是否正确，或联系技术支持"
         }
-
-
-def _parse_address(address_str: str, format_hint: str) -> Dict[str, Any]:
-    """解析地址字符串"""
-    
-    try:
-        # 检测格式
-        detected_format = _detect_number_format(address_str)
-        
-        # 如果指定了格式，使用指定格式，否则使用检测到的格式
-        if format_hint != "auto":
-            detected_format = format_hint
-        
-        # 解析地址
-        if detected_format == "hex":
-            # 处理十六进制
-            clean_addr = address_str.lower().replace('0x', '').replace('0X', '')
-            if not re.match(r'^[0-9a-f]+$', clean_addr):
-                return {"error": f"无效的十六进制地址: {address_str}"}
-            value = int(clean_addr, 16)
-        else:
-            # 处理十进制
-            if not re.match(r'^[0-9]+$', address_str):
-                return {"error": f"无效的十进制地址: {address_str}"}
-            value = int(address_str, 10)
-        
-        if value < 0:
-            return {"error": "地址不能为负数"}
-        
-        return {
-            "value": value,
-            "detected_format": detected_format
-        }
-        
-    except ValueError as e:
-        return {"error": f"地址解析错误: {str(e)}"}
-    except Exception as e:
-        return {"error": f"地址解析时发生未知错误: {str(e)}"}
-
-
-def _detect_number_format(number_str: str) -> str:
-    """检测数字格式"""
-    
-    # 检查是否有十六进制前缀
-    if number_str.lower().startswith('0x'):
-        return "hex"
-    
-    # 检查是否包含十六进制字符
-    if re.search(r'[a-fA-F]', number_str):
-        return "hex"
-    
-    # 默认为十进制
-    return "dec"

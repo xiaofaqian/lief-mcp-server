@@ -1,7 +1,14 @@
 import lief
-import re
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Dict, Any, List
 from pydantic import Field
+
+from .common import (
+    compile_regex_filter,
+    paginate_items,
+    parse_macho,
+    select_architecture_by_index,
+    validate_file_path,
+)
 
 
 def list_macho_relocations(
@@ -10,8 +17,9 @@ def list_macho_relocations(
     count: Annotated[int, Field(description="返回的重定位项数量，最大100条，0表示返回所有剩余重定位项", ge=0, le=100)] = 20,
     symbol_filter: Annotated[Optional[str], Field(description="符号名称过滤器，支持正则表达式匹配。例如：'_err' 或 '^_.*' 或 '.*malloc.*'")] = None,
     architecture_index: Annotated[int, Field(description="对于Fat Binary文件，指定要分析的架构索引（从0开始）。如果不指定，将分析第一个架构", ge=0)] = 0,
-    include_symbol_table_info: Annotated[bool, Field(description="是否包含符号表和动态链接器信息的详细统计")] = True
-) -> str:
+    include_symbol_table_info: Annotated[bool, Field(description="是否包含符号表和动态链接器信息的详细统计")] = True,
+    output_format: Annotated[str, Field(description="输出格式：'text' 或 'json'")] = "text",
+) -> Any:
     """
     列出 Mach-O 文件中的重定位信息，包括地址、类型、符号名称等详细数据。
 
@@ -26,18 +34,20 @@ def list_macho_relocations(
     """
     
     try:
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        if not fat_binary:
-            return f"错误：无法解析文件 {file_path}"
-        
-        # 选择架构
-        if len(fat_binary) <= architecture_index:
-            return f"错误：架构索引 {architecture_index} 超出范围，文件只有 {len(fat_binary)} 个架构"
-        
-        binary = fat_binary.at(architecture_index)
-        if not binary:
-            return f"错误：无法获取架构 {architecture_index} 的二进制文件"
+        if output_format not in ["text", "json"]:
+            return {"error": f"无效的输出格式: {output_format}", "suggestion": "请使用 'text' 或 'json'"}
+
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return _format_error(path_error, output_format)
+
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return _format_error(parse_error, output_format)
+
+        binary, arch_error = select_architecture_by_index(fat_binary, architecture_index)
+        if arch_error:
+            return _format_error(arch_error, output_format)
         
         result = []
         
@@ -86,8 +96,11 @@ def list_macho_relocations(
             result.extend(symbol_table_info)
             result.append("")
         
-        # 获取重定位信息和绑定信息
-        relocations = []
+        regex_filter, filter_error = compile_regex_filter(symbol_filter)
+        if filter_error:
+            return _format_error(filter_error, output_format)
+
+        relocations: List[Dict[str, Any]] = []
         
         # 首先收集绑定信息（这些包含符号名称）
         bindings_by_address = {}
@@ -221,17 +234,13 @@ def list_macho_relocations(
             # 如果重定位项没有符号信息，或者用户想要查看绑定信息，添加绑定信息
             if bindings_by_address:
                 # 检查是否有符号过滤器，如果有，先检查绑定信息中是否有匹配项
-                has_symbol_filter = symbol_filter is not None
+                has_symbol_filter = regex_filter is not None
                 
                 # 添加绑定信息作为额外的重定位项
                 for address, binding_info in bindings_by_address.items():
                     # 如果有符号过滤器，先检查是否匹配
                     if has_symbol_filter:
-                        try:
-                            pattern = re.compile(symbol_filter, re.IGNORECASE)
-                            if not (pattern.search(binding_info['symbol']) or pattern.search(binding_info['binding_str'])):
-                                continue
-                        except re.error:
+                        if not (regex_filter.search(binding_info['symbol']) or regex_filter.search(binding_info['binding_str'])):
                             continue
                     
                     reloc_info = {
@@ -250,34 +259,29 @@ def list_macho_relocations(
             return "\n".join(result)
         
         # 应用符号过滤器
-        if symbol_filter:
-            try:
-                pattern = re.compile(symbol_filter, re.IGNORECASE)
-                filtered_relocations = []
-                for reloc in relocations:
-                    if pattern.search(reloc['symbol']) or pattern.search(reloc['raw_string']):
-                        filtered_relocations.append(reloc)
-                relocations = filtered_relocations
-            except re.error as e:
-                result.append(f"正则表达式错误: {str(e)}")
-                return "\n".join(result)
+        if regex_filter:
+            relocations = [
+                reloc
+                for reloc in relocations
+                if regex_filter.search(reloc["symbol"]) or regex_filter.search(reloc["raw_string"])
+            ]
         
         # 应用分页
         total_relocations = len(relocations)
-        if offset >= total_relocations:
-            result.append(f"偏移量 {offset} 超出范围，总共有 {total_relocations} 个重定位项")
+        page_relocations, pagination_info, pagination_error = paginate_items(relocations, offset, count)
+        if pagination_error:
+            if output_format == "json":
+                return pagination_error
+            result.append(pagination_error["error"])
             return "\n".join(result)
-        
-        end_index = offset + count if count > 0 else total_relocations
-        end_index = min(end_index, total_relocations)
-        page_relocations = relocations[offset:end_index]
         
         # 添加统计信息
         result.append(f"重定位信息统计:")
         result.append(f"  总重定位项数量: {total_relocations}")
         if symbol_filter:
             result.append(f"  过滤条件: {symbol_filter}")
-        result.append(f"  显示范围: {offset} - {end_index-1}")
+        end_index = pagination_info.get("end_index", 0)
+        result.append(f"  显示范围: {offset} - {max(end_index - 1, 0)}")
         result.append("")
         
         # 添加表头
@@ -305,12 +309,35 @@ def list_macho_relocations(
                     result.append(f"格式化重定位项时出错: {str(e)}")
         
         # 添加分页提示
-        if end_index < total_relocations:
+        if pagination_info.get("has_more"):
             result.append("")
             result.append(f"还有 {total_relocations - end_index} 个重定位项未显示")
             result.append(f"使用 offset={end_index} 查看更多")
         
-        return "\n".join(result)
+        if output_format == "text":
+            return "\n".join(result)
+
+        return {
+            "file_path": file_path,
+            "architecture_index": architecture_index,
+            "cpu_type": str(binary.header.cpu_type),
+            "symbol_filter": symbol_filter,
+            "include_symbol_table_info": include_symbol_table_info,
+            "total_relocations": total_relocations,
+            "pagination_info": pagination_info,
+            "relocations": page_relocations,
+            "symbol_table_info": symbol_table_info,
+        }
         
     except Exception as e:
-        return f"解析文件时发生错误: {str(e)}"
+        return _format_error({"error": f"解析文件时发生错误: {str(e)}"}, output_format)
+
+
+def _format_error(error_info: Dict[str, Any], output_format: str) -> Any:
+    if output_format == "json":
+        return error_info
+    message = error_info.get("error", "未知错误")
+    suggestion = error_info.get("suggestion")
+    if suggestion:
+        return f"错误：{message}\n建议：{suggestion}"
+    return f"错误：{message}"

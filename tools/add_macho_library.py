@@ -8,9 +8,15 @@ Mach-O 添加依赖库工具
 from typing import Annotated, Dict, Any, Optional
 from pydantic import Field
 import lief
-import os
 import shutil
-from datetime import datetime
+
+from .common import (
+    create_backup_path,
+    format_version,
+    parse_macho,
+    validate_file_path,
+    write_macho,
+)
 
 
 def add_macho_library(
@@ -58,13 +64,10 @@ def add_macho_library(
     }
     
     try:
-        # 验证输入文件
-        if not os.path.exists(file_path):
-            result["message"] = f"文件不存在: {file_path}"
-            return result
-        
-        if not os.access(file_path, os.R_OK):
-            result["message"] = f"无权限读取文件: {file_path}"
+        path_error = validate_file_path(file_path)
+        if path_error:
+            result["message"] = path_error["error"]
+            result["suggestion"] = path_error.get("suggestion")
             return result
         
         # 验证库路径格式
@@ -81,8 +84,12 @@ def add_macho_library(
         
         # 备份原文件
         if backup_original:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f"{file_path}.backup_{timestamp}"
+            backup_path = create_backup_path(
+                file_path,
+                suffix="backup",
+                separator=".",
+                timestamp_sep="_",
+            )
             try:
                 shutil.copy2(file_path, backup_path)
                 result["backup_path"] = backup_path
@@ -91,13 +98,10 @@ def add_macho_library(
                 return result
         
         # 解析 Mach-O 文件
-        try:
-            fat_binary = lief.MachO.parse(file_path)
-            if fat_binary is None:
-                result["message"] = "无法解析 Mach-O 文件，可能文件格式不正确"
-                return result
-        except Exception as e:
-            result["message"] = f"解析文件失败: {str(e)}"
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            result["message"] = parse_error["error"]
+            result["suggestion"] = parse_error.get("suggestion")
             return result
         
         # 获取文件信息
@@ -142,8 +146,8 @@ def add_macho_library(
                         "already_exists": True,
                         "existing_library": {
                             "name": lib.name,
-                            "current_version": _format_version_simple(lib.current_version),
-                            "compatibility_version": _format_version_simple(lib.compatibility_version),
+                            "current_version": format_version(lib.current_version, simple=True),
+                            "compatibility_version": format_version(lib.compatibility_version, simple=True),
                             "command_type": str(lib.command)
                         }
                     }
@@ -163,8 +167,8 @@ def add_macho_library(
                     "name": library_path,
                     "path_type": path_validation["path_type"],
                     "description": path_validation["description"],
-                    "current_version": _format_version_simple(added_library.current_version),
-                    "compatibility_version": _format_version_simple(added_library.compatibility_version),
+                    "current_version": format_version(added_library.current_version, simple=True),
+                    "compatibility_version": format_version(added_library.compatibility_version, simple=True),
                     "command_type": str(added_library.command)
                 },
                 "total_libraries_before": len(existing_libraries),
@@ -185,7 +189,11 @@ def add_macho_library(
         # 写入文件
         try:
             output_file = output_path or file_path
-            fat_binary.write(output_file)
+            write_error = write_macho(fat_binary, output_file)
+            if write_error:
+                result["message"] = write_error["error"]
+                result["suggestion"] = write_error.get("suggestion")
+                return result
             result["output_path"] = output_file
         except Exception as e:
             result["message"] = f"写入修改后的文件失败: {str(e)}"
@@ -324,20 +332,3 @@ def _validate_library_path(library_path: str) -> Dict[str, Any]:
         })
     
     return validation
-
-
-def _format_version_simple(version) -> str:
-    """简单格式化版本号"""
-    
-    try:
-        if isinstance(version, list) and len(version) >= 3:
-            return f"{version[0]}.{version[1]}.{version[2]}"
-        elif isinstance(version, int):
-            major = (version >> 16) & 0xFFFF
-            minor = (version >> 8) & 0xFF
-            patch = version & 0xFF
-            return f"{major}.{minor}.{patch}"
-        else:
-            return str(version)
-    except Exception:
-        return str(version)

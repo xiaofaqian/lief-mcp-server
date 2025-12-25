@@ -7,9 +7,9 @@ Mach-O 移除依赖库工具
 from typing import Annotated, Dict, Any
 from pydantic import Field
 import lief
-import os
 import shutil
-from datetime import datetime
+
+from .common import create_backup_path, parse_macho, validate_file_path, write_macho
 
 
 def remove_macho_library(
@@ -43,30 +43,20 @@ def remove_macho_library(
         包含操作结果的字典
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        if not os.access(file_path, os.W_OK):
-            return {
-                "error": f"无权限写入文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有写入权限"
-            }
+        path_error = validate_file_path(file_path, require_write=True)
+        if path_error:
+            return path_error
         
         # 创建备份
         if backup_original:
             try:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                backup_path = f"{file_path}.backup.{timestamp}"
+                backup_path = create_backup_path(
+                    file_path,
+                    suffix="backup",
+                    separator=".",
+                    timestamp_sep=".",
+                    include_microseconds=True,
+                )
                 shutil.copy2(file_path, backup_path)
             except Exception as e:
                 return {
@@ -75,20 +65,9 @@ def remove_macho_library(
                 }
         
         # 解析 Mach-O 文件
-        try:
-            fat_binary = lief.MachO.parse(file_path)
-            if fat_binary is None:
-                return {
-                    "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                    "file_path": file_path,
-                    "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-                }
-        except Exception as e:
-            return {
-                "error": f"解析 Mach-O 文件时发生错误: {str(e)}",
-                "file_path": file_path,
-                "suggestion": "文件可能已损坏或格式不支持"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 标记是否找到并移除了库
         library_removed = False
@@ -141,13 +120,10 @@ def remove_macho_library(
             print(f"警告: 移除代码签名时发生警告: {str(e)}")
         
         # 写回文件
-        try:
-            fat_binary.write(file_path)
-        except Exception as e:
-            return {
-                "error": f"写入修改后的文件时发生错误: {str(e)}",
-                "suggestion": "请检查磁盘空间和文件权限"
-            }
+        write_error = write_macho(fat_binary, file_path)
+        if write_error:
+            write_error["suggestion"] = "请检查磁盘空间和文件权限"
+            return write_error
         
         # 返回成功结果
         return {

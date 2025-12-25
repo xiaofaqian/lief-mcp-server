@@ -7,7 +7,8 @@ ARM64 分支目标地址计算工具
 
 from typing import Annotated, Dict, Any, Union
 from pydantic import Field
-import re
+
+from .common import parse_number
 
 
 def calculate_arm64_branch_target(
@@ -67,27 +68,21 @@ def calculate_arm64_branch_target(
                 "suggestion": "请使用 'bl'、'b'、'adr'、'adrp'、'bl_raw'、'b_raw' 或 'custom' 中的一个"
             }
         
-        # 解析当前地址
-        current_addr_result = _parse_address(current_address.strip(), input_format)
-        if "error" in current_addr_result:
+        current_addr_value, current_format, parse_error = parse_number(current_address.strip(), input_format)
+        if parse_error:
             return {
-                "error": f"解析当前地址失败: {current_addr_result['error']}",
+                "error": f"解析当前地址失败: {parse_error['error']}",
                 "input_address": current_address,
                 "suggestion": "请检查地址格式，支持十六进制（0x100007008）或十进制（4295000072）"
             }
         
-        # 解析偏移量
-        offset_result = _parse_offset(offset.strip(), input_format)
-        if "error" in offset_result:
+        offset_value, offset_format, offset_error = parse_number(offset.strip(), input_format)
+        if offset_error:
             return {
-                "error": f"解析偏移量失败: {offset_result['error']}",
+                "error": f"解析偏移量失败: {offset_error['error']}",
                 "input_offset": offset,
                 "suggestion": "请检查偏移量格式，支持十六进制（0x78E08）或十进制（494872），可以为负数"
             }
-        
-        # 计算目标地址
-        current_addr_value = current_addr_result["value"]
-        offset_value = offset_result["value"]
         
         # 根据指令类型计算目标地址
         if instruction_type == "adrp":
@@ -123,13 +118,13 @@ def calculate_arm64_branch_target(
                 "current_address": {
                     "value": current_addr_value,
                     "hex": hex(current_addr_value),
-                    "input_format": current_addr_result["detected_format"],
+                    "input_format": current_format,
                     "original_input": current_address
                 },
                 "offset": {
                     "value": offset_value,
                     "hex": hex(offset_value) if offset_value >= 0 else f"-{hex(-offset_value)}",
-                    "input_format": offset_result["detected_format"],
+                    "input_format": offset_format,
                     "original_input": offset,
                     "is_negative": offset_value < 0
                 },
@@ -187,102 +182,6 @@ def calculate_arm64_branch_target(
             },
             "suggestion": "请检查输入参数是否正确，或联系技术支持"
         }
-
-
-def _parse_address(address_str: str, format_hint: str) -> Dict[str, Any]:
-    """解析地址字符串"""
-    
-    try:
-        # 检测格式
-        detected_format = _detect_number_format(address_str)
-        
-        # 如果指定了格式，使用指定格式，否则使用检测到的格式
-        if format_hint != "auto":
-            detected_format = format_hint
-        
-        # 解析地址
-        if detected_format == "hex":
-            # 处理十六进制
-            clean_addr = address_str.lower().replace('0x', '').replace('0X', '')
-            if not re.match(r'^[0-9a-f]+$', clean_addr):
-                return {"error": f"无效的十六进制地址: {address_str}"}
-            value = int(clean_addr, 16)
-        else:
-            # 处理十进制
-            if not re.match(r'^[0-9]+$', address_str):
-                return {"error": f"无效的十进制地址: {address_str}"}
-            value = int(address_str, 10)
-        
-        if value < 0:
-            return {"error": "地址不能为负数"}
-        
-        return {
-            "value": value,
-            "detected_format": detected_format
-        }
-        
-    except ValueError as e:
-        return {"error": f"地址解析错误: {str(e)}"}
-    except Exception as e:
-        return {"error": f"地址解析时发生未知错误: {str(e)}"}
-
-
-def _parse_offset(offset_str: str, format_hint: str) -> Dict[str, Any]:
-    """解析偏移量字符串"""
-    
-    try:
-        # 检查是否为负数
-        is_negative = offset_str.startswith('-')
-        clean_offset = offset_str.lstrip('-+')
-        
-        # 检测格式
-        detected_format = _detect_number_format(clean_offset)
-        
-        # 如果指定了格式，使用指定格式，否则使用检测到的格式
-        if format_hint != "auto":
-            detected_format = format_hint
-        
-        # 解析偏移量
-        if detected_format == "hex":
-            # 处理十六进制
-            clean_hex = clean_offset.lower().replace('0x', '').replace('0X', '')
-            if not re.match(r'^[0-9a-f]+$', clean_hex):
-                return {"error": f"无效的十六进制偏移量: {offset_str}"}
-            value = int(clean_hex, 16)
-        else:
-            # 处理十进制
-            if not re.match(r'^[0-9]+$', clean_offset):
-                return {"error": f"无效的十进制偏移量: {offset_str}"}
-            value = int(clean_offset, 10)
-        
-        # 应用符号
-        if is_negative:
-            value = -value
-        
-        return {
-            "value": value,
-            "detected_format": detected_format
-        }
-        
-    except ValueError as e:
-        return {"error": f"偏移量解析错误: {str(e)}"}
-    except Exception as e:
-        return {"error": f"偏移量解析时发生未知错误: {str(e)}"}
-
-
-def _detect_number_format(number_str: str) -> str:
-    """检测数字格式"""
-    
-    # 检查是否有十六进制前缀
-    if number_str.lower().startswith('0x'):
-        return "hex"
-    
-    # 检查是否包含十六进制字符
-    if re.search(r'[a-fA-F]', number_str):
-        return "hex"
-    
-    # 默认为十进制
-    return "dec"
 
 
 def _get_instruction_multiplier(instruction_type: str, custom_multiplier: int) -> int:

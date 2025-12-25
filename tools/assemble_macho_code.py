@@ -5,13 +5,19 @@ Mach-O 代码汇编工具
 支持多种架构的指令修改，可以在指定虚拟地址处插入新的汇编代码。
 """
 
-from typing import Annotated, Dict, Any, List, Optional
+from typing import Annotated, Dict, Any, List, Optional, Tuple
 from pydantic import Field
 import lief
-import os
 import shutil
-import datetime
-import uuid
+
+from .common import (
+    create_backup_path,
+    is_executable_address,
+    parse_macho,
+    parse_number,
+    select_architecture_by_name,
+    validate_file_path,
+)
 
 
 def assemble_macho_code(
@@ -29,7 +35,10 @@ def assemble_macho_code(
     )] = "",
     backup_original: Annotated[bool, Field(
         description="是否备份原始文件。如果为True，将创建带时间戳和唯一ID的备份文件"
-    )] = True
+    )] = True,
+    engine: Annotated[str, Field(
+        description="汇编引擎：'auto'(优先keystone)、'lief' 或 'keystone'"
+    )] = "auto",
 ) -> Dict[str, Any]:
     """
     在指定地址替换 Mach-O 指令
@@ -43,18 +52,9 @@ def assemble_macho_code(
     支持单架构和 Fat Binary 文件的指令修改。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
         # 验证参数
         if not target_address.strip():
@@ -69,16 +69,14 @@ def assemble_macho_code(
                 "suggestion": "请提供要插入的汇编指令，如 'mov x0, #0x1234'"
             }
         
-        # 解析目标地址
-        try:
-            if target_address.startswith('0x') or target_address.startswith('0X'):
-                address = int(target_address, 16)
-            else:
-                try:
-                    address = int(target_address, 16)
-                except ValueError:
-                    address = int(target_address, 10)
-        except ValueError:
+        if engine not in ["auto", "lief", "keystone"]:
+            return {
+                "error": f"无效的汇编引擎: {engine}",
+                "suggestion": "请使用 'auto'、'lief' 或 'keystone'",
+            }
+
+        address, _, parse_error = parse_number(target_address, "auto", prefer_hex=True)
+        if parse_error:
             return {
                 "error": f"无效的地址格式: {target_address}",
                 "suggestion": "请使用十六进制格式（如 0x100001000）或十进制格式"
@@ -87,12 +85,14 @@ def assemble_macho_code(
         # 备份原始文件
         backup_path = None
         if backup_original:
-            # 生成带时间戳和唯一ID的备份文件名
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            unique_id = str(uuid.uuid4())[:8]  # 使用UUID的前8位
-            base_name, ext = os.path.splitext(file_path)
-            backup_path = f"{base_name}.backup_{timestamp}_{unique_id}{ext}"
-            
+            backup_path = create_backup_path(
+                file_path,
+                suffix="backup",
+                separator=".",
+                timestamp_sep="_",
+                include_uuid=True,
+                insert_before_ext=True,
+            )
             try:
                 shutil.copy2(file_path, backup_path)
             except Exception as e:
@@ -101,18 +101,12 @@ def assemble_macho_code(
                     "suggestion": "请检查文件权限或磁盘空间"
                 }
         
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 选择架构
-        binary = _select_architecture(fat_binary, architecture)
+        binary = select_architecture_by_name(fat_binary, architecture)
         if binary is None:
             available_archs = [str(b.header.cpu_type) for b in fat_binary]
             return {
@@ -122,23 +116,35 @@ def assemble_macho_code(
             }
         
         # 验证地址是否在有效范围内
-        if not _is_valid_address(binary, address):
+        if not is_executable_address(binary, address):
             return {
                 "error": f"地址 {hex(address)} 不在有效的代码段范围内",
                 "suggestion": "请检查地址是否正确，或使用 list_macho_segments 工具查看可用的代码段"
             }
         
-        # 执行汇编操作 - 直接使用原始汇编代码，LIEF 支持多行汇编
-        try:
-            # 使用 LIEF 的 assemble 方法，直接传递多行汇编代码
-            binary.assemble(address, assembly_code.strip())
-            
-        except Exception as e:
-            return {
-                "error": f"汇编操作失败: {str(e)}",
-                "assembly_code": assembly_code.strip(),
-                "suggestion": "请检查汇编语法是否正确，或尝试简化指令"
-            }
+        use_keystone = engine in ["auto", "keystone"] and _keystone_available()
+        if use_keystone:
+            ks, ks_error = _get_keystone_engine(binary)
+            if ks_error:
+                return ks_error
+            try:
+                encoding, _ = ks.asm(assembly_code.strip(), address)
+                binary.patch_address(address, encoding)
+            except Exception as e:
+                return {
+                    "error": f"Keystone 汇编失败: {str(e)}",
+                    "assembly_code": assembly_code.strip(),
+                    "suggestion": "请检查汇编语法是否正确，或尝试简化指令"
+                }
+        else:
+            try:
+                binary.assemble(address, assembly_code.strip())
+            except Exception as e:
+                return {
+                    "error": f"汇编操作失败: {str(e)}",
+                    "assembly_code": assembly_code.strip(),
+                    "suggestion": "请检查汇编语法是否正确，或尝试简化指令"
+                }
         
         # 写入修改后的文件
         try:
@@ -179,28 +185,6 @@ def assemble_macho_code(
         }
 
 
-def _select_architecture(fat_binary: lief.MachO.FatBinary, architecture: str) -> Optional[lief.MachO.Binary]:
-    """选择指定的架构"""
-    
-    if not architecture:
-        # 如果没有指定架构，返回第一个
-        return fat_binary[0] if len(fat_binary) > 0 else None
-    
-    # 尝试按架构名称匹配
-    arch_lower = architecture.lower()
-    for binary in fat_binary:
-        cpu_type_str = str(binary.header.cpu_type).lower()
-        if arch_lower in cpu_type_str or cpu_type_str in arch_lower:
-            return binary
-    
-    return None
-
-
-def _is_valid_address(binary: lief.MachO.Binary, address: int) -> bool:
-    """检查地址是否在有效的代码段范围内"""
-    return True
-
-
 def _get_modified_instructions(binary: lief.MachO.Binary, address: int, count: int = 5) -> str:
     """获取修改后的指令，返回简单的字符串格式"""
     
@@ -225,3 +209,36 @@ def _get_modified_instructions(binary: lief.MachO.Binary, address: int, count: i
     
     # 将指令列表连接为多行字符串
     return "\n".join(instructions)
+
+
+def _keystone_available() -> bool:
+    try:
+        import keystone  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _get_keystone_engine(binary: lief.MachO.Binary) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+    try:
+        import keystone
+    except Exception:
+        return None, {
+            "error": "未安装 keystone-engine",
+            "suggestion": "请安装 keystone-engine 以启用汇编功能",
+        }
+
+    cpu = str(binary.header.cpu_type).upper()
+    if "ARM64" in cpu:
+        return keystone.Ks(keystone.KS_ARCH_ARM64, keystone.KS_MODE_LITTLE_ENDIAN), None
+    if "ARM" in cpu:
+        return keystone.Ks(keystone.KS_ARCH_ARM, keystone.KS_MODE_ARM | keystone.KS_MODE_LITTLE_ENDIAN), None
+    if "X86_64" in cpu or "X86_64H" in cpu:
+        return keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64), None
+    if "X86" in cpu:
+        return keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_32), None
+
+    return None, {
+        "error": f"不支持的架构类型: {binary.header.cpu_type}",
+        "suggestion": "请确认架构是否被 keystone 支持",
+    }

@@ -5,11 +5,18 @@ Mach-O 代码反汇编工具
 提供按虚拟地址、函数名或节名反汇编代码的功能，支持多种架构的指令分析。
 """
 
-from typing import Annotated, Dict, Any, List, Optional
+from typing import Annotated, Dict, Any, List, Optional, Tuple
 from pydantic import Field
 import lief
-import os
-import re
+
+from .common import (
+    get_available_architectures,
+    is_executable_address,
+    parse_macho,
+    parse_number,
+    select_architecture_by_name,
+    validate_file_path,
+)
 
 
 def disassemble_macho_code(
@@ -32,7 +39,10 @@ def disassemble_macho_code(
     )] = 20,
     show_bytes: Annotated[bool, Field(
         description="是否显示指令的原始字节码"
-    )] = True
+    )] = True,
+    engine: Annotated[str, Field(
+        description="反汇编引擎：'auto'(优先capstone)、'lief' 或 'capstone'"
+    )] = "auto",
 ) -> Dict[str, Any]:
     """
     使用 LIEF 反汇编 Mach-O 文件中的代码段，支持多种反汇编方式。
@@ -47,18 +57,9 @@ def disassemble_macho_code(
     支持单架构和 Fat Binary 文件的代码反汇编。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
         # 验证参数
         if target_type not in ["address", "function", "section"]:
@@ -73,33 +74,35 @@ def disassemble_macho_code(
                 "suggestion": "请提供有效的地址、函数名或节名"
             }
         
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 选择架构
-        binary = _select_architecture(fat_binary, architecture)
+        binary = select_architecture_by_name(fat_binary, architecture)
         if binary is None:
-            available_archs = [str(b.header.cpu_type) for b in fat_binary]
+            available_archs = get_available_architectures(fat_binary)
             return {
                 "error": f"未找到指定的架构: {architecture}",
                 "available_architectures": available_archs,
                 "suggestion": f"请使用可用的架构之一: {', '.join(available_archs)}"
             }
         
+        if engine not in ["auto", "lief", "capstone"]:
+            return {
+                "error": f"无效的反汇编引擎: {engine}",
+                "suggestion": "请使用 'auto'、'lief' 或 'capstone'",
+            }
+
+        use_capstone = engine in ["auto", "capstone"] and _capstone_available()
+
         # 根据目标类型进行反汇编
         if target_type == "address":
-            result = _disassemble_by_address(binary, target_value, instruction_count, show_bytes)
+            result = _disassemble_by_address(binary, target_value, instruction_count, show_bytes, use_capstone)
         elif target_type == "function":
-            result = _disassemble_by_function(binary, target_value, show_bytes)
+            result = _disassemble_by_function(binary, target_value, show_bytes, use_capstone)
         elif target_type == "section":
-            result = _disassemble_by_section(binary, target_value, instruction_count, show_bytes)
+            result = _disassemble_by_section(binary, target_value, instruction_count, show_bytes, use_capstone)
         
         return result
         
@@ -113,55 +116,43 @@ def disassemble_macho_code(
         }
 
 
-def _select_architecture(fat_binary: lief.MachO.FatBinary, architecture: str) -> Optional[lief.MachO.Binary]:
-    """选择指定的架构"""
-    
-    if not architecture:
-        # 如果没有指定架构，返回第一个
-        return fat_binary[0] if len(fat_binary) > 0 else None
-    
-    # 尝试按架构名称匹配
-    arch_lower = architecture.lower()
-    for binary in fat_binary:
-        cpu_type_str = str(binary.header.cpu_type).lower()
-        if arch_lower in cpu_type_str or cpu_type_str in arch_lower:
-            return binary
-    
-    return None
-
-
-def _disassemble_by_address(binary: lief.MachO.Binary, address_str: str, instruction_count: int, show_bytes: bool) -> Dict[str, Any]:
+def _disassemble_by_address(
+    binary: lief.MachO.Binary,
+    address_str: str,
+    instruction_count: int,
+    show_bytes: bool,
+    use_capstone: bool,
+) -> Dict[str, Any]:
     """按地址反汇编指定数量的指令"""
     
     try:
         # 解析地址
-        if address_str.startswith('0x') or address_str.startswith('0X'):
-            address = int(address_str, 16)
-        else:
-            try:
-                address = int(address_str, 16)
-            except ValueError:
-                address = int(address_str, 10)
+        address, _, parse_error = parse_number(address_str, "auto", prefer_hex=True)
+        if parse_error:
+            return {
+                "error": f"无效的地址格式: {address_str}",
+                "suggestion": "请使用十六进制格式（如 0x100001000）或十进制格式"
+            }
         
         # 验证地址是否在有效范围内
-        if not _is_valid_address(binary, address):
+        if not is_executable_address(binary, address):
             return {
                 "error": f"地址 {hex(address)} 不在有效的代码段范围内",
                 "suggestion": "请检查地址是否正确，或使用 list_macho_segments 工具查看可用的代码段"
             }
         
-        # 使用 LIEF 反汇编
-        instructions = []
-        instruction_iter = binary.disassemble(address)
-        
-        count = 0
-        for inst in instruction_iter:
-            if count >= instruction_count:
-                break
-            
-            inst_info = _extract_instruction_info(inst, show_bytes)
-            instructions.append(inst_info)
-            count += 1
+        instructions: List[str] = []
+        if use_capstone:
+            instructions = _capstone_disassemble(binary, address, None, instruction_count, show_bytes)
+        if not instructions:
+            instruction_iter = binary.disassemble(address)
+            count = 0
+            for inst in instruction_iter:
+                if count >= instruction_count:
+                    break
+                inst_info = _extract_instruction_info(inst, show_bytes)
+                instructions.append(inst_info)
+                count += 1
         
         if not instructions:
             return {
@@ -187,7 +178,12 @@ def _disassemble_by_address(binary: lief.MachO.Binary, address_str: str, instruc
         }
 
 
-def _disassemble_by_function(binary: lief.MachO.Binary, function_name: str, show_bytes: bool) -> Dict[str, Any]:
+def _disassemble_by_function(
+    binary: lief.MachO.Binary,
+    function_name: str,
+    show_bytes: bool,
+    use_capstone: bool,
+) -> Dict[str, Any]:
     """按函数名反汇编整个函数的代码"""
     
     try:
@@ -224,34 +220,34 @@ def _disassemble_by_function(binary: lief.MachO.Binary, function_name: str, show
             }
         
         # 验证地址是否在有效范围内
-        if not _is_valid_address(binary, function_address):
+        if not is_executable_address(binary, function_address):
             return {
                 "error": f"函数 {function_name} 的地址 {hex(function_address)} 不在有效的代码段范围内",
                 "suggestion": "请检查函数是否为本地定义的函数"
             }
         
-        # 反汇编函数
-        instructions = []
-        instruction_iter = binary.disassemble(function_address)
-        
-        # 尝试确定函数结束位置
+        instructions: List[str] = []
         function_end = _estimate_function_end(binary, function_address)
-        
-        for inst in instruction_iter:
-            inst_info = _extract_instruction_info(inst, show_bytes)
-            instructions.append(inst_info)
-            
-            # 检查是否到达函数结束
-            if function_end and inst.address >= function_end:
-                break
-            
-            # 检查是否遇到返回指令
-            if _is_return_instruction(inst):
-                break
-            
-            # 防止无限循环
-            if len(instructions) > 1000:
-                break
+
+        if use_capstone:
+            size = None
+            if function_end and function_end > function_address:
+                size = function_end - function_address
+            else:
+                size = _estimate_read_size(binary, 512)
+            instructions = _capstone_disassemble(binary, function_address, size, 0, show_bytes, stop_on_return=True)
+
+        if not instructions:
+            instruction_iter = binary.disassemble(function_address)
+            for inst in instruction_iter:
+                inst_info = _extract_instruction_info(inst, show_bytes)
+                instructions.append(inst_info)
+                if function_end and inst.address >= function_end:
+                    break
+                if _is_return_instruction(inst):
+                    break
+                if len(instructions) > 1000:
+                    break
         
         if not instructions:
             return {
@@ -272,7 +268,13 @@ def _disassemble_by_function(binary: lief.MachO.Binary, function_name: str, show
         }
 
 
-def _disassemble_by_section(binary: lief.MachO.Binary, section_name: str, instruction_count: int, show_bytes: bool) -> Dict[str, Any]:
+def _disassemble_by_section(
+    binary: lief.MachO.Binary,
+    section_name: str,
+    instruction_count: int,
+    show_bytes: bool,
+    use_capstone: bool,
+) -> Dict[str, Any]:
     """按节名反汇编整个代码节"""
     
     try:
@@ -309,25 +311,29 @@ def _disassemble_by_section(binary: lief.MachO.Binary, section_name: str, instru
                 "suggestion": "请选择包含可执行代码的节，如 __text"
             }
         
-        # 反汇编节内容
         section_address = target_section.virtual_address
-        instructions = []
-        instruction_iter = binary.disassemble(section_address)
-        
-        count = 0
         section_end = section_address + target_section.size
-        
-        for inst in instruction_iter:
-            if count >= instruction_count and instruction_count > 0:
-                break
-            
-            # 检查是否超出节范围
-            if inst.address >= section_end:
-                break
-            
-            inst_info = _extract_instruction_info(inst, show_bytes)
-            instructions.append(inst_info)
-            count += 1
+        instructions: List[str] = []
+        if use_capstone:
+            instructions = _capstone_disassemble(
+                binary,
+                section_address,
+                target_section.size,
+                instruction_count,
+                show_bytes,
+                stop_on_address=section_end,
+            )
+        if not instructions:
+            instruction_iter = binary.disassemble(section_address)
+            count = 0
+            for inst in instruction_iter:
+                if count >= instruction_count and instruction_count > 0:
+                    break
+                if inst.address >= section_end:
+                    break
+                inst_info = _extract_instruction_info(inst, show_bytes)
+                instructions.append(inst_info)
+                count += 1
         
         if not instructions:
             return {
@@ -409,21 +415,6 @@ def _extract_instruction_info(inst, show_bytes: bool) -> str:
 
 
 
-def _is_valid_address(binary: lief.MachO.Binary, address: int) -> bool:
-    """检查地址是否在有效的代码段范围内"""
-    
-    for segment in binary.segments:
-        if segment.virtual_address <= address < segment.virtual_address + segment.virtual_size:
-            # 检查是否为可执行段
-            if hasattr(segment, 'flags') and 'EXECUTE' in str(segment.flags):
-                return True
-            # 检查段名称
-            if segment.name in ['__TEXT']:
-                return True
-    
-    return False
-
-
 def _is_code_section(section, segment) -> bool:
     """检查是否为代码节"""
     
@@ -494,3 +485,83 @@ def _get_available_code_sections(binary: lief.MachO.Binary) -> List[Dict[str, st
                 })
     
     return code_sections
+
+
+def _capstone_available() -> bool:
+    try:
+        import capstone  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _get_capstone_engine(binary: lief.MachO.Binary):
+    try:
+        import capstone
+    except Exception:
+        return None
+
+    cpu = str(binary.header.cpu_type).upper()
+    if "ARM64" in cpu:
+        return capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_LITTLE_ENDIAN)
+    if "ARM" in cpu:
+        return capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM | capstone.CS_MODE_LITTLE_ENDIAN)
+    if "X86_64" in cpu or "X86_64H" in cpu:
+        return capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    if "X86" in cpu:
+        return capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    return None
+
+
+def _capstone_disassemble(
+    binary: lief.MachO.Binary,
+    address: int,
+    size: Optional[int],
+    instruction_count: int,
+    show_bytes: bool,
+    stop_on_return: bool = False,
+    stop_on_address: Optional[int] = None,
+) -> List[str]:
+    md = _get_capstone_engine(binary)
+    if md is None:
+        return []
+    if size is None:
+        size = _estimate_read_size(binary, instruction_count)
+    try:
+        data = binary.get_content_from_virtual_address(address, size)
+        code = bytes(data)
+    except Exception:
+        return []
+
+    instructions: List[str] = []
+    for inst in md.disasm(code, address):
+        if instruction_count and len(instructions) >= instruction_count:
+            break
+        if stop_on_address and inst.address >= stop_on_address:
+            break
+        mnemonic = inst.mnemonic.lower()
+        if stop_on_return and mnemonic in ["ret", "retq", "bx"]:
+            instructions.append(_format_capstone_instruction(inst, show_bytes))
+            break
+        instructions.append(_format_capstone_instruction(inst, show_bytes))
+
+    return instructions
+
+
+def _format_capstone_instruction(inst: Any, show_bytes: bool) -> str:
+    operands = inst.op_str or ""
+    inst_str = f"{inst.mnemonic} {operands}".strip()
+    if show_bytes:
+        bytes_str = " ".join(f"{b:02x}" for b in inst.bytes)
+        return f"{hex(inst.address)} {inst_str} {bytes_str}".strip()
+    return f"{hex(inst.address)} {inst_str}".strip()
+
+
+def _estimate_read_size(binary: lief.MachO.Binary, instruction_count: int) -> int:
+    count = max(instruction_count, 1)
+    cpu = str(binary.header.cpu_type).upper()
+    if "ARM" in cpu:
+        return count * 4
+    if "X86" in cpu:
+        return count * 16
+    return count * 8

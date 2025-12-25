@@ -8,7 +8,8 @@ Mach-O 加载命令信息获取工具
 from typing import Annotated, Dict, Any, List
 from pydantic import Field
 import lief
-import os
+
+from .common import format_size, parse_macho, validate_file_path
 
 
 def get_macho_load_commands(
@@ -31,28 +32,13 @@ def get_macho_load_commands(
     支持单架构和 Fat Binary 文件的加载命令信息提取。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 构建结果
         result = {
@@ -163,7 +149,7 @@ def _extract_command_specific_info(command, command_type: str) -> Dict[str, Any]
                 "virtual_size": {
                     "value": command.virtual_size,
                     "hex": hex(command.virtual_size),
-                    "human_readable": _format_size(command.virtual_size)
+                    "human_readable": format_size(command.virtual_size)
                 } if hasattr(command, 'virtual_size') else None,
                 "file_offset": {
                     "value": command.file_offset,
@@ -172,7 +158,7 @@ def _extract_command_specific_info(command, command_type: str) -> Dict[str, Any]
                 "file_size": {
                     "value": command.file_size,
                     "hex": hex(command.file_size),
-                    "human_readable": _format_size(command.file_size)
+                    "human_readable": format_size(command.file_size)
                 } if hasattr(command, 'file_size') else None,
                 "max_protection": _parse_protection_flags(command.max_protection) if hasattr(command, 'max_protection') else None,
                 "init_protection": _parse_protection_flags(command.init_protection) if hasattr(command, 'init_protection') else None,
@@ -458,26 +444,11 @@ def _calculate_command_statistics(commands: List[Dict[str, Any]]) -> Dict[str, A
             stats["command_types"][cmd_type] = stats["command_types"].get(cmd_type, 0) + 1
     
     # 格式化总大小
-    stats["total_size_formatted"] = _format_size(stats["total_size"])
+    stats["total_size_formatted"] = format_size(stats["total_size"])
     
     return stats
 
 
 def _format_size(size_bytes: int) -> str:
-    """格式化字节大小为人类可读格式"""
-    
-    if size_bytes == 0:
-        return "0 B"
-    
-    units = ["B", "KB", "MB", "GB", "TB"]
-    size = float(size_bytes)
-    unit_index = 0
-    
-    while size >= 1024 and unit_index < len(units) - 1:
-        size /= 1024
-        unit_index += 1
-    
-    if unit_index == 0:
-        return f"{int(size)} {units[unit_index]}"
-    else:
-        return f"{size:.2f} {units[unit_index]}"
+    """兼容旧接口，保留内部调用入口"""
+    return format_size(size_bytes)

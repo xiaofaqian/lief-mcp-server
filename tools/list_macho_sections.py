@@ -8,7 +8,8 @@ Mach-O 节信息列表工具
 from typing import Annotated, Dict, Any, List
 from pydantic import Field
 import lief
-import os
+
+from .common import format_size, parse_macho, validate_file_path
 
 
 def list_macho_sections(
@@ -30,28 +31,13 @@ def list_macho_sections(
     支持单架构和 Fat Binary 文件的节信息提取。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 构建结果
         result = {
@@ -134,7 +120,7 @@ def _extract_single_section_info(section, segment_name: str) -> Dict[str, Any]:
         "size": {
             "value": section.size,
             "hex": hex(section.size),
-            "human_readable": _format_size(section.size)
+            "human_readable": format_size(section.size)
         },
         "offset": {
             "value": section.offset,
@@ -469,26 +455,11 @@ def _calculate_section_statistics(sections: List[Dict[str, Any]]) -> Dict[str, A
                 stats["debug_sections"] += 1
     
     # 格式化总大小
-    stats["total_size_formatted"] = _format_size(stats["total_size"])
+    stats["total_size_formatted"] = format_size(stats["total_size"])
     
     return stats
 
 
 def _format_size(size_bytes: int) -> str:
-    """格式化字节大小为人类可读格式"""
-    
-    if size_bytes == 0:
-        return "0 B"
-    
-    units = ["B", "KB", "MB", "GB", "TB"]
-    size = float(size_bytes)
-    unit_index = 0
-    
-    while size >= 1024 and unit_index < len(units) - 1:
-        size /= 1024
-        unit_index += 1
-    
-    if unit_index == 0:
-        return f"{int(size)} {units[unit_index]}"
-    else:
-        return f"{size:.2f} {units[unit_index]}"
+    """兼容旧接口，保留内部调用入口"""
+    return format_size(size_bytes)

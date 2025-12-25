@@ -18,7 +18,8 @@
 from typing import Annotated, Dict, Any, Optional
 from pydantic import Field
 import lief
-import os
+
+from .common import format_size, parse_macho, select_architecture_by_index, validate_file_path
 
 
 def add_macho_section(
@@ -60,18 +61,9 @@ def add_macho_section(
     - 其他架构: 零字节填充
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
         # 验证参数
         if fill_type not in ["empty", "nop"]:
@@ -80,25 +72,13 @@ def add_macho_section(
                 "suggestion": "填充类型必须是 'empty' 或 'nop'"
             }
         
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
-        
-        # 检查架构索引
-        if architecture_index >= len(fat_binary):
-            return {
-                "error": f"架构索引 {architecture_index} 超出范围，文件只有 {len(fat_binary)} 个架构",
-                "suggestion": f"请使用 0 到 {len(fat_binary) - 1} 之间的架构索引"
-            }
-        
-        # 获取指定架构的二进制文件
-        binary = fat_binary.at(architecture_index)
+        binary, arch_error = select_architecture_by_index(fat_binary, architecture_index)
+        if arch_error:
+            return arch_error
         
         # 获取架构信息
         arch_info = _get_architecture_info(binary)
@@ -163,7 +143,7 @@ def add_macho_section(
             "section_info": {
                 "section_name": section_name,
                 "size": size,
-                "size_formatted": _format_size(size),
+                "size_formatted": format_size(size),
                 "fill_type": fill_type,
                 "virtual_address": hex(added_section.virtual_address) if hasattr(added_section, 'virtual_address') else "N/A",
                 "file_offset": hex(added_section.offset) if hasattr(added_section, 'offset') else "N/A",
@@ -278,19 +258,5 @@ def _get_content_preview(content: list) -> Dict[str, Any]:
 
 
 def _format_size(size_bytes: int) -> str:
-    """格式化字节大小为人类可读格式"""
-    if size_bytes == 0:
-        return "0 B"
-    
-    units = ["B", "KB", "MB", "GB", "TB"]
-    size = float(size_bytes)
-    unit_index = 0
-    
-    while size >= 1024 and unit_index < len(units) - 1:
-        size /= 1024
-        unit_index += 1
-    
-    if unit_index == 0:
-        return f"{int(size)} {units[unit_index]}"
-    else:
-        return f"{size:.2f} {units[unit_index]}"
+    """兼容旧接口，保留内部调用入口"""
+    return format_size(size_bytes)

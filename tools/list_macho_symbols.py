@@ -8,8 +8,7 @@ Mach-O 符号表信息列表工具
 from typing import Annotated, Dict, Any, List, Optional
 from pydantic import Field
 import lief
-import os
-import re
+from .common import compile_regex_filter, paginate_items, parse_macho, validate_file_path
 
 
 def list_macho_symbols(
@@ -43,28 +42,13 @@ def list_macho_symbols(
     支持单架构和 Fat Binary 文件的符号信息提取。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 构建结果
         result = {
@@ -101,16 +85,10 @@ def _extract_symbols_info(binary: lief.MachO.Binary, index: int, offset: int = 0
     header = binary.header
     
     # 编译正则表达式过滤器
-    regex_filter = None
-    if name_filter:
-        try:
-            regex_filter = re.compile(name_filter, re.IGNORECASE)
-        except re.error as e:
-            return {
-                "architecture_index": index,
-                "error": f"正则表达式过滤器无效: {name_filter}, 错误: {str(e)}",
-                "suggestion": "请检查正则表达式语法，例如：'^_.*' 或 '.*malloc.*'"
-            }
+    regex_filter, filter_error = compile_regex_filter(name_filter)
+    if filter_error:
+        filter_error["architecture_index"] = index
+        return filter_error
     
     # 收集所有符号信息
     all_symbols = []
@@ -137,27 +115,15 @@ def _extract_symbols_info(binary: lief.MachO.Binary, index: int, offset: int = 0
                     "error": f"解析符号信息时发生错误: {str(e)}"
                 })
     
-    # 应用分页
     filtered_count = len(all_symbols)
-    
-    # 检查偏移量是否有效
-    if offset >= filtered_count and filtered_count > 0:
-        return {
+    paged_symbols, pagination_info, pagination_error = paginate_items(all_symbols, offset, count)
+    if pagination_error:
+        pagination_error.update({
             "architecture_index": index,
             "cpu_type": str(header.cpu_type),
             "cpu_subtype": str(header.cpu_subtype),
-            "error": f"偏移量 {offset} 超出范围，过滤后的符号总数为 {filtered_count}",
-            "suggestion": f"请使用 0 到 {max(0, filtered_count - 1)} 之间的偏移量"
-        }
-    
-    # 计算实际返回的符号数量
-    if count == 0:
-        # 返回所有剩余符号
-        end_index = filtered_count
-    else:
-        end_index = min(offset + count, filtered_count)
-    
-    paged_symbols = all_symbols[offset:end_index]
+        })
+        return pagination_error
     
     # 基本架构信息
     arch_info = {
@@ -169,9 +135,9 @@ def _extract_symbols_info(binary: lief.MachO.Binary, index: int, offset: int = 0
             "filtered_symbols_count": filtered_count,
             "requested_offset": offset,
             "requested_count": count,
-            "returned_count": len(paged_symbols),
-            "has_more": end_index < filtered_count,
-            "next_offset": end_index if end_index < filtered_count else None
+            "returned_count": pagination_info["returned_count"],
+            "has_more": pagination_info["has_more"],
+            "next_offset": pagination_info["next_offset"]
         },
         "filter_info": {
             "name_filter": name_filter,

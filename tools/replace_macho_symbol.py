@@ -8,9 +8,15 @@ Mach-O 符号替换工具
 from typing import Annotated, Dict, Any, Optional
 from pydantic import Field
 import lief
-import os
-import uuid
-import datetime
+import shutil
+
+from .common import (
+    create_backup_path,
+    parse_macho,
+    select_architecture_by_index,
+    validate_file_path,
+    write_macho,
+)
 
 
 def replace_macho_symbol(
@@ -47,63 +53,34 @@ def replace_macho_symbol(
     支持单架构和 Fat Binary 文件的符号替换操作。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        if not os.access(file_path, os.W_OK):
-            return {
-                "error": f"无权限写入文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有写入权限"
-            }
+        path_error = validate_file_path(file_path, require_write=True)
+        if path_error:
+            return path_error
         
         # 标准化符号名称（添加下划线前缀）
         internal_original = f"_{original_symbol}"
         internal_replacement = f"_{replacement_symbol}"
         dylib_path = f"@executable_path/Frameworks/{custom_dylib_name}"
         
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
-        
-        # 检查架构索引
-        if architecture_index >= len(fat_binary):
-            return {
-                "error": f"架构索引 {architecture_index} 超出范围，文件只有 {len(fat_binary)} 个架构",
-                "suggestion": f"请使用 0 到 {len(fat_binary) - 1} 之间的架构索引"
-            }
-        
-        binary = fat_binary.at(architecture_index)
-        if binary is None:
-            return {
-                "error": f"无法获取架构 {architecture_index} 的二进制文件",
-                "suggestion": "请检查架构索引是否正确"
-            }
+        binary, arch_error = select_architecture_by_index(fat_binary, architecture_index)
+        if arch_error:
+            return arch_error
         
         # 备份原始文件
         backup_path = None
         if backup_original:
             try:
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                unique_id = str(uuid.uuid4())[:8]
-                backup_path = f"{file_path}.backup_{timestamp}_{unique_id}"
-                
-                import shutil
+                backup_path = create_backup_path(
+                    file_path,
+                    suffix="backup",
+                    separator=".",
+                    timestamp_sep="_",
+                    include_uuid=True,
+                )
                 shutil.copy2(file_path, backup_path)
             except Exception as e:
                 return {
@@ -132,11 +109,10 @@ def replace_macho_symbol(
             result["warnings"].append(f"移除代码签名时发生警告: {str(e)}")
         
         # 写入修改后的文件
-        try:
-            fat_binary.write(file_path)
-        except Exception as e:
+        write_error = write_macho(fat_binary, file_path)
+        if write_error:
             return {
-                "error": f"写入修改后的文件失败: {str(e)}",
+                "error": write_error["error"],
                 "suggestion": "请检查文件权限和磁盘空间",
                 "backup_path": backup_path
             }

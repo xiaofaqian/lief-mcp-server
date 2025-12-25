@@ -9,7 +9,14 @@ from typing import Annotated, Dict, Any, List, Optional
 from pydantic import Field
 import lief
 import os
-import re
+
+from .common import (
+    compile_regex_filter,
+    format_version,
+    paginate_items,
+    parse_macho,
+    validate_file_path,
+)
 
 
 def list_macho_libraries(
@@ -48,28 +55,13 @@ def list_macho_libraries(
     支持单架构和 Fat Binary 文件的库依赖信息提取。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
+
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 构建结果
         result = {
@@ -114,16 +106,10 @@ def _extract_libraries_info(
     header = binary.header
     
     # 编译正则表达式过滤器
-    regex_filter = None
-    if name_filter:
-        try:
-            regex_filter = re.compile(name_filter, re.IGNORECASE)
-        except re.error as e:
-            return {
-                "architecture_index": index,
-                "error": f"正则表达式过滤器无效: {name_filter}, 错误: {str(e)}",
-                "suggestion": "请检查正则表达式语法，例如：'^/usr/lib/.*' 或 '.*Foundation.*'"
-            }
+    regex_filter, filter_error = compile_regex_filter(name_filter)
+    if filter_error:
+        filter_error["architecture_index"] = index
+        return filter_error
     
     # 收集所有库依赖信息
     all_libraries = []
@@ -151,27 +137,15 @@ def _extract_libraries_info(
                     "error": f"解析库依赖信息时发生错误: {str(e)}"
                 })
     
-    # 应用分页
     filtered_count = len(all_libraries)
-    
-    # 检查偏移量是否有效
-    if offset >= filtered_count and filtered_count > 0:
-        return {
+    paged_libraries, pagination_info, pagination_error = paginate_items(all_libraries, offset, count)
+    if pagination_error:
+        pagination_error.update({
             "architecture_index": index,
             "cpu_type": str(header.cpu_type),
             "cpu_subtype": str(header.cpu_subtype),
-            "error": f"偏移量 {offset} 超出范围，过滤后的库依赖总数为 {filtered_count}",
-            "suggestion": f"请使用 0 到 {max(0, filtered_count - 1)} 之间的偏移量"
-        }
-    
-    # 计算实际返回的库依赖数量
-    if count == 0:
-        # 返回所有剩余库依赖
-        end_index = filtered_count
-    else:
-        end_index = min(offset + count, filtered_count)
-    
-    paged_libraries = all_libraries[offset:end_index]
+        })
+        return pagination_error
     
     # 简化模式：只返回核心信息
     if simplified:
@@ -192,9 +166,9 @@ def _extract_libraries_info(
                 "filtered_libraries_count": filtered_count,
                 "requested_offset": offset,
                 "requested_count": count,
-                "returned_count": len(paged_libraries),
-                "has_more": end_index < filtered_count,
-                "next_offset": end_index if end_index < filtered_count else None
+                "returned_count": pagination_info["returned_count"],
+                "has_more": pagination_info["has_more"],
+                "next_offset": pagination_info["next_offset"]
             },
             "filter_info": {
                 "name_filter": name_filter,
@@ -259,52 +233,8 @@ def _extract_single_library_info(library, include_analysis: bool = True, simplif
 
 
 def _format_version(version) -> Dict[str, Any]:
-    """格式化版本号为可读格式"""
-    
-    try:
-        # 检查版本号的类型
-        if isinstance(version, list) and len(version) >= 3:
-            # LIEF 返回的是列表格式 [major, minor, patch]
-            major, minor, patch = version[0], version[1], version[2]
-            version_string = f"{major}.{minor}.{patch}"
-            
-            return {
-                "raw": version,
-                "formatted": version_string,
-                "major": major,
-                "minor": minor,
-                "patch": patch
-            }
-        elif isinstance(version, int):
-            # 传统的32位整数格式：XXXX.YY.ZZ
-            major = (version >> 16) & 0xFFFF
-            minor = (version >> 8) & 0xFF
-            patch = version & 0xFF
-            
-            version_string = f"{major}.{minor}.{patch}"
-            
-            return {
-                "raw": version,
-                "formatted": version_string,
-                "major": major,
-                "minor": minor,
-                "patch": patch
-            }
-        else:
-            # 其他格式，直接转换为字符串
-            return {
-                "raw": version,
-                "formatted": str(version),
-                "major": 0,
-                "minor": 0,
-                "patch": 0
-            }
-    except Exception as e:
-        return {
-            "raw": version,
-            "formatted": str(version),
-            "error": f"版本号格式解析失败: {str(e)}"
-        }
+    """兼容旧接口，保留内部调用入口"""
+    return format_version(version)
 
 
 def _get_load_command_description(command_type: str) -> str:

@@ -8,8 +8,7 @@
 from typing import Annotated, Dict, Any, List, Optional
 from pydantic import Field
 import lief
-import os
-import re
+from .common import parse_macho, parse_number, select_architecture_by_index, validate_file_path
 
 
 def find_got_symbol_by_address(
@@ -41,53 +40,24 @@ def find_got_symbol_by_address(
     支持单架构和 Fat Binary 文件的符号查找。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        # 解析目标地址
-        try:
-            if target_address.lower().startswith('0x'):
-                target_addr = int(target_address, 16)
-            else:
-                target_addr = int(target_address)
-        except ValueError:
+        target_addr, _, parse_error = parse_number(target_address, "auto")
+        if parse_error:
             return {
                 "error": f"无效的地址格式: {target_address}",
                 "suggestion": "请使用十六进制格式（如0x100001000）或十进制格式（如4295000072）"
             }
         
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
-        
-        # 选择架构
-        if len(fat_binary) <= architecture_index:
-            return {
-                "error": f"架构索引 {architecture_index} 超出范围，文件只有 {len(fat_binary)} 个架构",
-                "suggestion": f"请使用 0 到 {len(fat_binary) - 1} 之间的架构索引"
-            }
-        
-        binary = fat_binary.at(architecture_index)
-        if not binary:
-            return {
-                "error": f"无法获取架构 {architecture_index} 的二进制文件"
-            }
+        binary, arch_error = select_architecture_by_index(fat_binary, architecture_index)
+        if arch_error:
+            return arch_error
         
         # 查找符号
         result = _find_symbol_by_address(binary, target_addr, search_range, architecture_index)

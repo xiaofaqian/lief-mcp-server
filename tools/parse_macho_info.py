@@ -10,6 +10,8 @@ from pydantic import Field
 import lief
 import os
 
+from .common import parse_macho, format_size_compact, validate_file_path
+
 
 def parse_macho_info(
     file_path: Annotated[str, Field(
@@ -28,39 +30,24 @@ def parse_macho_info(
     返回包含文件基本信息、架构详情、段节统计等结构化数据。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
-        
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
         # 获取文件基本信息
         file_stat = os.stat(file_path)
         file_size = file_stat.st_size
         
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "file_size": file_size,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            parse_error["file_size"] = file_size
+            return parse_error
         
         # 构建基本结果信息
         result = {
             "file_path": file_path,
             "file_size": file_size,
-            "file_size_human": _format_file_size(file_size),
+            "file_size_human": format_size_compact(file_size),
             "is_fat_binary": len(fat_binary) > 1,
             "architecture_count": len(fat_binary),
             "architectures": []
@@ -190,13 +177,5 @@ def _generate_summary(architectures: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _format_file_size(size_bytes: int) -> str:
-    """格式化文件大小为人类可读格式"""
-    
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+    """兼容旧接口，保留内部调用入口"""
+    return format_size_compact(size_bytes)

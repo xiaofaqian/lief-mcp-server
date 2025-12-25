@@ -8,7 +8,8 @@ Mach-O 头部信息获取工具
 from typing import Annotated, Dict, Any, List
 from pydantic import Field
 import lief
-import os
+
+from .common import parse_macho, validate_file_path
 
 
 def get_macho_header(
@@ -30,28 +31,13 @@ def get_macho_header(
     支持单架构和 Fat Binary 文件的头部信息提取。
     """
     try:
-        # 验证文件路径
-        if not os.path.exists(file_path):
-            return {
-                "error": f"文件不存在: {file_path}",
-                "suggestion": "请检查文件路径是否正确，确保使用完整的绝对路径"
-            }
+        path_error = validate_file_path(file_path)
+        if path_error:
+            return path_error
         
-        if not os.access(file_path, os.R_OK):
-            return {
-                "error": f"无权限读取文件: {file_path}",
-                "suggestion": "请检查文件权限，确保当前用户有读取权限"
-            }
-        
-        # 解析 Mach-O 文件
-        fat_binary = lief.MachO.parse(file_path)
-        
-        if fat_binary is None:
-            return {
-                "error": "无法解析文件，可能不是有效的 Mach-O 文件",
-                "file_path": file_path,
-                "suggestion": "请确认文件是有效的 Mach-O 格式文件"
-            }
+        fat_binary, parse_error = parse_macho(file_path)
+        if parse_error:
+            return parse_error
         
         # 构建结果
         result = {
